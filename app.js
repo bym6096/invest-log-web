@@ -185,7 +185,7 @@
     if (bd) {
       const hit = items.find((it) => it.amount !== null && Math.abs(it.amount - bd.realized) < 0.011);
       const target = hit || { coin: '', amount: bd.realized, date: '', funding: null, fee: null, note: '손익 상세만 있어요. 코인과 날짜를 직접 고르세요', source: 'Realized PNL 상세' };
-      target.funding = bd.funding; target.fee = bd.fee;
+      target.funding = bd.funding; target.fee = bd.fee; target.matched = !!hit;
       if (Math.abs(bd.closing + bd.funding + bd.fee + bd.ins - bd.realized) > 0.05) target.note = (target.note ? target.note + ' / ' : '') + '상세 항목 합계가 실현 손익과 달라요';
       if (!hit) items.push(target);
     }
@@ -204,12 +204,18 @@
       shot = { error: '읽을 수 있는 기록을 찾지 못했어요. SUIUSDT 같은 코인 이름과 Realized PNL이 들어 있는 텍스트인지 확인하세요.', items: null };
       return render();
     }
+    // 손익 상세 팝업과 짝이 맞는 카드가 있으면 그것만 기본 선택 (같이 찍힌 다른 카드는 해제)
+    const focus = items.some((x) => x.matched);
     shot = {
       error: '',
       items: items.map((x) => {
         const coin = findCoin(x.coin.toUpperCase()) ? x.coin.toUpperCase() : '';
         const bad = x.amount === null;
-        return { on: !bad && !!coin, coin, amount: bad ? 0 : x.amount, date: x.date, funding: x.funding, fee: x.fee, note: x.note, source: x.source };
+        let note = x.note;
+        if (focus && !x.matched) note = (note ? note + ' / ' : '') + '손익 상세 팝업과 다른 카드예요. 필요하면 체크하세요';
+        // 날짜를 못 읽은 카드는 화면이 잘린 경우가 많아 기본 해제
+        const on = !bad && !!coin && !!x.date && (!focus || !!x.matched);
+        return { on, coin, amount: bad ? 0 : x.amount, date: x.date, funding: x.funding, fee: x.fee, note, source: x.source };
       }),
     };
     sortShot();
