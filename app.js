@@ -80,6 +80,13 @@
     return { dep, wd, profit, invested: base.balance + dep };
   }
 
+  // 기준 시점부터, 입출금이 없었다고 가정한 시드 (입금은 빼고 출금은 더함)
+  function adjustedSeries(base) {
+    const list = snaps();
+    const i = list.indexOf(base);
+    return list.slice(i < 0 ? 0 : i).map((r) => ({ date: r.date, actual: r.balance, adj: base.balance + profitBetween(base, r).profit }));
+  }
+
   function baseSnap(list, last) {
     const b = list.find((x) => x.id === db.baseline);
     return b && b.date <= last.date ? b : list[0];
@@ -123,7 +130,7 @@
   function lineChart(series) {
     const W = 600, H = 200, pl = 44, pr = 8, pt = 10, pb = 22;
     const pts = series.flatMap((s) => s.pts);
-    if (pts.length < 2) return '<p class="muted">데이터가 부족합니다</p>';
+    if (series.every((x) => x.pts.length < 2)) return '<p class="hint">기준 시점 이후 기록이 더 쌓이면 그래프가 표시돼요.</p>';
     const t0 = Math.min(...pts.map((p) => p[0])), t1 = Math.max(...pts.map((p) => p[0]));
     let v0 = Math.min(...pts.map((p) => p[1])), v1 = Math.max(...pts.map((p) => p[1]));
     const pad = (v1 - v0) * 0.08 || 1;
@@ -368,7 +375,22 @@
     <section class="card">
       <h2>총 시드 추이 <small class="muted">(입출금 미반영)</small></h2>
       ${lineChart([{ name: '바이낸스 USD', color: 'var(--c1)', pts: snaps().map((r) => [T(r.date), r.balance]) }])}
-    </section>`;
+    </section>
+    ${(() => {
+      const ser = adjustedSeries(s.base);
+      const end = ser[ser.length - 1];
+      return `<section class="card">
+      <h2>입출금 반영 시드 추이 <small class="muted">(${short(s.base.date)} 기준~)</small></h2>
+      <div class="row2">
+        <div><div class="label">실제 총 시드</div><div class="v">${usd(end.actual)}</div></div>
+        <div><div class="label">입출금 반영 시드</div><div class="v ${cls(end.adj - s.base.balance)}">${usd(end.adj)}</div></div>
+      </div>
+      ${lineChart([
+        { name: '실제 총 시드', color: 'var(--c1)', pts: ser.map((r) => [T(r.date), r.actual]) },
+        { name: '입출금 반영', color: 'var(--c2)', pts: ser.map((r) => [T(r.date), r.adj]) },
+      ])}
+      <p class="hint">입출금 반영 시드는 입금은 빼고 출금은 더해서, 입출금이 없었다고 가정한 시드예요. 두 선의 간격이 누적 출금(−입금)이고, 기준 시드 ${usd(s.base.balance)} 대비 변화가 입출금 제외 손익이에요. 기준 시점은 맨 위에서 바꿀 수 있어요.</p></section>`;
+    })()}`;
   }
 
   const cancelBtn = (e) => (e ? '<button type="button" class="btn alt" data-cancel>취소</button>' : '');
