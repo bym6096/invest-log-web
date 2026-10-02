@@ -82,3 +82,5 @@ nav button.on { color: var(--accent); font-weight: 700; }
 .list li.editli { display: block; }
 .list li.editli .form { margin: 4px 0; }
 .x[data-edit] { font-size: 15px; }
+.basepick { display: block; margin: 0 0 10px; }
+.basepick select { margin-top: 3px; }

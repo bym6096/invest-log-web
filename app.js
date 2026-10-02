@@ -15,9 +15,14 @@
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) return JSON.parse(raw);
+      if (raw) return normalize(JSON.parse(raw));
     } catch (e) { /* 저장소 접근 불가 시 기본 데이터 */ }
     return JSON.parse(JSON.stringify(EMPTY));
+  }
+  // 스냅샷의 after: 그날 입출금이 이미 반영된 잔고인지 (옛 데이터는 메모 끝이 '후'면 반영된 것으로 본다)
+  function normalize(d) {
+    d.snapshots.forEach((r) => { if (r.after === undefined) r.after = /후$/.test(r.note || ''); });
+    return d;
   }
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { /* ignore */ }
@@ -63,20 +68,34 @@
     return { rows, pnl, wd };
   }
 
+  // base ~ last 사이에 발생한 입출금만 반영한다. 같은 날짜는 잔고가 입출금 전/후 중 어느 쪽인지(after)로 판단.
+  function profitBetween(base, last) {
+    const afterBase = (f) => f.date > base.date || (f.date === base.date && !base.after);
+    const beforeLast = (f) => f.date < last.date || (f.date === last.date && last.after);
+    const flows = db.flows.filter((f) => afterBase(f) && beforeLast(f));
+    const dep = flows.filter((f) => f.type === 'in').reduce((a, f) => a + (f.usd || 0), 0);
+    const wd = flows.filter((f) => f.type === 'out').reduce((a, f) => a + (f.usd || 0), 0);
+    const profit = last.balance - base.balance - dep + wd;
+    return { dep, wd, profit, invested: base.balance + dep };
+  }
+
+  function baseSnap(list, last) {
+    const b = list.find((x) => x.id === db.baseline);
+    return b && b.date <= last.date ? b : list[0];
+  }
+
   function summary() {
     const s = snaps();
-    const first = s[0], last = s[s.length - 1];
+    const last = s[s.length - 1];
+    const base = baseSnap(s, last);
     const coinSum = db.coins.reduce((a, c) => a + curSeed(c), 0);
-    const inRange = (f) => f.date > first.date && f.date <= last.date;
-    const dep = db.flows.filter((f) => f.type === 'in' && inRange(f)).reduce((a, f) => a + (f.usd || 0), 0);
-    const wd = db.flows.filter((f) => f.type === 'out' && inRange(f)).reduce((a, f) => a + (f.usd || 0), 0);
-    const profit = last.balance - first.balance - dep + wd;
-    const invested = first.balance + dep;
+    const cur = profitBetween(base, last);
+    const all = profitBetween(s[0], last);
     const diff = coinSum - last.balance;
     const coinWd = db.coins.reduce((a, c) => a + coinStats(c).wd, 0);
     const totalWd = db.flows.filter((f) => f.type === 'out').reduce((a, f) => a + (f.usd || 0), 0);
     const hasEst = db.flows.some((f) => f.est);
-    return { first, last, coinSum, dep, wd, profit, invested, diff, coinWd, totalWd, hasEst };
+    return { first: s[0], base, last, coinSum, cur, all, diff, coinWd, totalWd, hasEst };
   }
 
   // 코인 시드 합계가 바뀐 시점별 오차 (코인 이벤트 날짜가 있는 시점부터)
@@ -141,10 +160,14 @@
     <section class="card hero">
       <div class="label">현재 바이낸스 시드 · ${short(s.last.date)}${s.last.np ? ' · np' : ''}</div>
       <div class="big">${usd(s.last.balance)}</div>
+      <label class="basepick">기준 시점<select id="base">${[...snaps()].reverse().filter((r) => r.date <= s.last.date).map((r) =>
+        `<option value="${r.id}"${r.id === s.base.id ? ' selected' : ''}>${short(r.date)} · ${num(r.balance, 2).replace(/\.00$/, '')}${r.after ? ' (입출금 후)' : ''}</option>`).join('')}</select></label>
       <div class="row2">
-        <div><div class="label">입출금 제외 손익</div><div class="v ${cls(s.profit)}">${signed(s.profit)}$</div></div>
-        <div><div class="label">수익률(입금 기준)</div><div class="v ${cls(s.profit)}">${num((s.profit / s.invested) * 100, 1)}%</div></div>
+        <div><div class="label">입출금 제외 손익</div><div class="v ${cls(s.cur.profit)}">${signed(s.cur.profit)}$</div></div>
+        <div><div class="label">수익률(기준 시드+입금)</div><div class="v ${cls(s.cur.profit)}">${num((s.cur.profit / s.cur.invested) * 100, 1)}%</div></div>
       </div>
+      <p class="hint">${short(s.base.date)} 이후 입금 ${usd(s.cur.dep)} · 출금 ${usd(s.cur.wd)} 반영.
+      전체 기간(${short(s.first.date)}~) 누적은 <span class="${cls(s.all.profit)}">${signed(s.all.profit)}$</span></p>
     </section>
 
     <section class="card">
@@ -169,7 +192,7 @@
     <section class="card">
       <h2>입출금</h2>
       <div class="row3">
-        <div><div class="label">누적 입금</div><div class="v">${usd(s.dep)}</div></div>
+        <div><div class="label">누적 입금</div><div class="v">${usd(s.all.dep)}</div></div>
         <div><div class="label">누적 출금</div><div class="v">${usd(s.totalWd)}</div></div>
         <div><div class="label">코인 시드에서<br>출금 표기</div><div class="v">${usd(s.coinWd)}</div></div>
       </div>
@@ -204,6 +227,7 @@
       <label>날짜<input type="date" name="date" value="${r ? r.date : today()}" required></label>
       <label>바이낸스 시드($, 미실현 제외)<input type="number" step="any" name="balance" value="${r ? r.balance : ''}" required inputmode="decimal"></label></div>
       <label class="chk"><input type="checkbox" name="np"${!r || r.np ? ' checked' : ''}> 포지션 없음(np)</label>
+      <label class="chk"><input type="checkbox" name="after"${r && r.after ? ' checked' : ''}> 이 날짜의 입출금이 이미 반영된 잔고</label>
       <label>메모<input name="note" value="${r ? val(r.note) : ''}"></label><button class="btn">저장</button>${cancelBtn(r)}</form>`;
   }
 
@@ -264,7 +288,7 @@
     <section class="card"><h2>총 시드 기록</h2>
       <button class="link" data-act="addsnap">${formOpen.snap ? '닫기' : '+ 시드 기록 추가'}</button>
       ${formOpen.snap ? snapForm() : ''}
-      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">np</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}</span>${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
+      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">np</span>' : ''}${r.after ? ' <span class="chip">입출금 후</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}</span>${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
     </section>
     <section class="card"><h2>입출금 (USD)</h2>
       <button class="link" data-act="addflow">${formOpen.flow ? '닫기' : '+ 입출금 추가'}</button>
@@ -370,7 +394,7 @@
     }
     if (kind === 'snap') {
       const r = id ? db.snapshots.find((x) => x.id === id) : { id: nid() };
-      Object.assign(r, { date: v.date, balance: +v.balance, np: !!v.np, note: v.note || '' });
+      Object.assign(r, { date: v.date, balance: +v.balance, np: !!v.np, after: !!v.after, note: v.note || '' });
       if (!id) db.snapshots.push(r);
       formOpen.snap = false;
     }
@@ -396,6 +420,7 @@
   });
 
   document.addEventListener('change', (ev) => {
+    if (ev.target.id === 'base') { db.baseline = ev.target.value; commit(); return; }
     if (ev.target.id !== 'imp') return;
     const file = ev.target.files[0];
     if (!file) return;
@@ -405,7 +430,7 @@
         if (!j.coins || !j.snapshots || !j.flows) throw new Error('형식 오류');
         j.log = j.log || [];
         if (db.snapshots.length && !confirm('현재 기록을 가져온 데이터로 바꿉니다. 계속할까요?')) return;
-        db = j; commit(); alert('가져오기 완료');
+        db = normalize(j); commit(); alert('가져오기 완료');
       } catch (e) { alert('가져오기 실패: ' + e.message); }
     });
   });
