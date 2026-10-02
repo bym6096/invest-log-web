@@ -149,9 +149,14 @@
   // ---------- 스크린샷 입력 (Claude API) ----------
   // API 키는 백업 JSON에 들어가지 않도록 데이터(db)와 분리해서 저장한다.
   const AI_KEY = 'invest.ai';
-  const AI_MODELS = { 'claude-opus-5-5': 'Claude Opus 5.5 (기본, 정확)', 'claude-sonnet-5-5': 'Claude Sonnet 5.5 (더 저렴)' };
+  const AI_DEFAULT = 'claude-sonnet-5-5';
+  const AI_MODELS = {
+    'claude-sonnet-5-5': 'Claude Sonnet 5.5 (기본, 빠르고 저렴)',
+    'claude-haiku-4-5': 'Claude Haiku 4.5 (가장 빠르고 저렴)',
+    'claude-opus-5-5': 'Claude Opus 5.5 (가장 정확, 비쌈)',
+  };
   function getAI() {
-    try { return { model: 'claude-opus-5-5', ...(JSON.parse(localStorage.getItem(AI_KEY)) || {}) }; } catch (e) { return { model: 'claude-opus-5-5' }; }
+    try { return { model: AI_DEFAULT, ...(JSON.parse(localStorage.getItem(AI_KEY)) || {}) }; } catch (e) { return { model: AI_DEFAULT }; }
   }
   function setAI(v) {
     try { localStorage.setItem(AI_KEY, JSON.stringify(v)); } catch (e) { /* ignore */ }
@@ -198,6 +203,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
   }
 
   async function callClaude(ai, content) {
+    const haiku = /haiku/.test(ai.model); // Haiku 4.5는 effort·폴백 옵션을 지원하지 않는다
     const post = (withFallback) => fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -212,12 +218,12 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
         max_tokens: 4096,
         system: SHOT_SYSTEM,
         messages: [{ role: 'user', content }],
-        output_config: { effort: 'medium', format: { type: 'json_schema', schema: SHOT_SCHEMA } },
+        output_config: { ...(haiku ? {} : { effort: 'medium' }), format: { type: 'json_schema', schema: SHOT_SCHEMA } },
         ...(withFallback ? { fallbacks: 'default' } : {}),
       }),
     });
-    let r = await post(true);
-    if (r.status === 400) r = await post(false); // 폴백 옵션이 거부되면 옵션 없이 한 번 더
+    let r = await post(!haiku);
+    if (r.status === 400 && !haiku) r = await post(false); // 폴백 옵션이 거부되면 옵션 없이 한 번 더
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       const msg = (j.error && j.error.message) || '';
@@ -597,7 +603,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
     const v = Object.fromEntries(new FormData(f));
     const kind = f.dataset.form;
     if (kind === 'ai') {
-      setAI({ key: (v.key || '').trim() || undefined, model: AI_MODELS[v.model] ? v.model : 'claude-opus-5-5' });
+      setAI({ key: (v.key || '').trim() || undefined, model: AI_MODELS[v.model] ? v.model : AI_DEFAULT });
       render(); alert('저장했어요.');
       return;
     }
