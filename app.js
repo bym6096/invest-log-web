@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v11';
+  const APP_VERSION = 'v12';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -79,13 +79,6 @@
     const wd = flows.filter((f) => f.type === 'out').reduce((a, f) => a + (f.usd || 0), 0);
     const profit = last.balance - base.balance - dep + wd;
     return { dep, wd, profit, invested: base.balance + dep };
-  }
-
-  // 기준 시점부터, 입출금이 없었다고 가정한 시드 (입금은 빼고 출금은 더함)
-  function adjustedSeries(base) {
-    const list = snaps();
-    const i = list.indexOf(base);
-    return list.slice(i < 0 ? 0 : i).map((r) => ({ date: r.date, actual: r.balance, adj: base.balance + profitBetween(base, r).profit }));
   }
 
   function baseSnap(list, last) {
@@ -374,26 +367,9 @@
       return f.fund || f.fee ? `<section class="card"><h2>펀딩비 · 수수료 <small class="muted">(기록된 거래 합계)</small></h2><div class="row3"><div><div class="label">펀딩비</div><div class="v ${cls(f.fund)}">${signed(f.fund, 2)}$</div></div><div><div class="label">거래수수료</div><div class="v ${cls(f.fee)}">${signed(f.fee, 2)}$</div></div><div><div class="label">합계</div><div class="v ${cls(f.fund + f.fee)}">${signed(f.fund + f.fee, 2)}$</div></div></div><p class="hint">실현 손익에는 이미 포함된 값이에요. 참고용으로만 보여줘요.</p></section>` : '';
     })()}
     <section class="card">
-      <h2>총 시드 추이 <small class="muted">(실제 잔고 · 출금하면 줄어듦)</small></h2>
+      <h2>총 시드 추이</h2>
       ${lineChart([{ name: '바이낸스 USD', color: 'var(--c1)', pts: snaps().map((r) => [T(r.date), r.balance]) }])}
-    </section>
-    ${(() => {
-      const ser = adjustedSeries(s.base);
-      const end = ser[ser.length - 1];
-      return `<section class="card">
-      <h2>출금 포함 시드 추이 <small class="muted">(${short(s.base.date)} 기준~)</small></h2>
-      <div class="row3">
-        <div><div class="label">실제 총 시드</div><div class="v">${usd(end.actual)}</div></div>
-        <div><div class="label">+ 누적 출금</div><div class="v">${usd(s.cur.wd)}</div></div>
-        <div><div class="label">= 출금 포함 시드</div><div class="v ${cls(end.adj - s.base.balance)}">${usd(end.adj)}</div></div>
-      </div>
-      ${s.cur.dep ? `<p class="hint">같은 기간 입금 ${usd(s.cur.dep)}은 빼고 계산했어요.</p>` : ''}
-      ${lineChart([
-        { name: '실제 총 시드', color: 'var(--c1)', pts: ser.map((r) => [T(r.date), r.actual]) },
-        { name: '출금 포함 시드', color: 'var(--c2)', pts: ser.map((r) => [T(r.date), r.adj]) },
-      ])}
-      <p class="hint">출금한 돈은 실제 시드에서 빠져 있어서 위 그래프는 그만큼 내려가요. 그 돈을 다시 더하면 출금이 없었다면 시드가 얼마였을지 볼 수 있어요. 두 선의 간격이 누적 출금이에요. 기준 시드 ${usd(s.base.balance)}보다 높으면 이익, 낮으면 손실이고, 맨 위 입출금 제외 손익과 같은 값이에요. 기준 시점은 맨 위에서 바꿀 수 있어요.</p></section>`;
-    })()}`;
+    </section>`;
   }
 
   const cancelBtn = (e) => (e ? '<button type="button" class="btn alt" data-cancel>취소</button>' : '');
