@@ -1,5 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
+  const APP_VERSION = 'v10';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -497,7 +498,11 @@
   }
 
   function viewSet() {
-    return `<section class="card"><h2>백업 · 복원</h2>
+    return `<section class="card"><h2>앱 정보</h2>
+      <p class="hint">실행 중인 버전: <b>${APP_VERSION}</b></p>
+      <button class="btn alt" data-act="hardrefresh">최신 버전으로 새로고침</button>
+      <p class="hint">화면이 옛날 그대로면 눌러보세요. 앱 파일 캐시만 지우고, 입력한 기록은 지워지지 않아요.</p></section>
+      <section class="card"><h2>백업 · 복원</h2>
       <p class="hint">데이터는 이 기기 브라우저에만 저장됩니다. 주기적으로 내보내기 하세요.</p>
       <button class="btn" data-act="export">JSON 내보내기</button>
       <label class="btn alt">JSON 가져오기<input type="file" accept="application/json" id="imp" hidden></label>
@@ -550,6 +555,16 @@
       }
       if (d.act === 'shotcancel') { shot = null; pasteDraft = ''; render(); }
       if (d.act === 'shotsave') saveShot();
+      if (d.act === 'hardrefresh') {
+        (async () => {
+          try {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+            await Promise.all((await caches.keys()).map((k) => caches.delete(k)));
+          } catch (e) { /* 지원하지 않으면 새로고침만 */ }
+          location.href = location.pathname + '?r=' + Date.now();
+        })();
+      }
       if (d.act === 'parse') runPaste($('#pastebox').value);
       if (d.act === 'export') {
         const a = document.createElement('a');
@@ -646,6 +661,7 @@
   document.addEventListener('input', (ev) => { if (ev.target.id === 'pastebox') pasteDraft = ev.target.value; });
   try { localStorage.removeItem('invest.ai'); } catch (e) { /* 이전 버전의 API 키 잔여분 삭제 */ }
 
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  // 브라우저는 서비스워커 업데이트를 매번 확인하지 않아서, 실행할 때마다 직접 확인한다
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
   render();
 })();
