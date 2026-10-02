@@ -32,7 +32,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const num = (n, d = 0) => Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
   const usd = (n) => '$' + num(n);
-  const signed = (n) => (n > 0 ? '+' : n < 0 ? '−' : '') + num(Math.abs(n));
+  const signed = (n, d = 0) => (n > 0 ? '+' : n < 0 ? '−' : '') + num(Math.abs(n), d);
   const cls = (n) => (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
   const short = (d) => (d ? d.slice(2).replace(/-/g, '/') : '–');
   const today = () => new Date().toISOString().slice(0, 10);
@@ -51,7 +51,7 @@
   const curSeed = (coin) => (coin.events.length ? coin.events[coin.events.length - 1].seed : 0);
 
   function coinStats(coin) {
-    let prev = null, pnl = 0, wd = 0;
+    let prev = null, pnl = 0, wd = 0, fund = 0, fee = 0;
     const rows = coin.events.map((e) => {
       let delta = null;
       if (prev !== null && (e.type === 't' || e.type === 'w')) {
@@ -61,11 +61,12 @@
         delta = e.seed - prev;
       }
       if (e.type === 'w') wd += e.amount || 0;
+      fund += e.funding || 0; fee += e.fee || 0;
       const row = { ...e, delta, pnlEvent: e.type === 't' || e.type === 'w' };
       prev = e.seed;
       return row;
     });
-    return { rows, pnl, wd };
+    return { rows, pnl, wd, fund, fee };
   }
 
   // base ~ last 사이에 발생한 입출금만 반영한다. 같은 날짜는 잔고가 입출금 전/후 중 어느 쪽인지(after)로 판단.
@@ -146,133 +147,78 @@
   const T = (d) => new Date(d).getTime();
 
 
-  // ---------- 스크린샷 입력 (Claude API) ----------
-  // API 키는 백업 JSON에 들어가지 않도록 데이터(db)와 분리해서 저장한다.
-  const AI_KEY = 'invest.ai';
-  const AI_DEFAULT = 'claude-sonnet-5-5';
-  const AI_MODELS = {
-    'claude-sonnet-5-5': 'Claude Sonnet 5.5 (기본, 빠르고 저렴)',
-    'claude-haiku-4-5': 'Claude Haiku 4.5 (가장 빠르고 저렴)',
-    'claude-opus-5-5': 'Claude Opus 5.5 (가장 정확, 비쌈)',
-  };
-  function getAI() {
-    try { return { model: AI_DEFAULT, ...(JSON.parse(localStorage.getItem(AI_KEY)) || {}) }; } catch (e) { return { model: AI_DEFAULT }; }
-  }
-  function setAI(v) {
-    try { localStorage.setItem(AI_KEY, JSON.stringify(v)); } catch (e) { /* ignore */ }
-  }
+  // ---------- 텍스트 붙여넣기 입력 (바이낸스 선물 Position History) ----------
+  // 갤러리의 글자 추출 등으로 복사한 텍스트를 읽는다. 글자 순서가 달라도 되도록 라벨 위치가 아니라 값의 종류로 판별한다.
+  const NUM = /^[+-]?\d[\d,]*(?:\.\d+)?$/;
+  const DT = /\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?/g;
+  const toNum = (w) => parseFloat(String(w).replace(/,/g, ''));
 
-  const SHOT_SCHEMA = {
-    type: 'object',
-    properties: {
-      items: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            kind: { type: 'string', enum: ['trade', 'balance'] },
-            coin: { type: 'string' },
-            amount: { type: 'number' },
-            date: { type: 'string' },
-            note: { type: 'string' },
-            source: { type: 'string' },
-          },
-          required: ['kind', 'coin', 'amount', 'date', 'note', 'source'],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ['items'],
-    additionalProperties: false,
-  };
-
-  const SHOT_SYSTEM = `You read screenshots from a crypto exchange app (mainly Binance USDⓈ-M futures) and extract records for a personal trading log.
-Return one record per item:
-- kind "trade": a closed / realized position result. amount = realized PnL in USD(T), signed (a loss is negative). coin = base asset ticker in uppercase (BTCUSDT -> BTC, 1000PEPEUSDT -> PEPE). date = the closing date as YYYY-MM-DD.
-- kind "balance": an account / wallet total balance screen. amount = total balance in USD (exclude unrealized PnL when the screen separates it). coin = "".
-Rules: ignore unrealized PnL of still-open positions. Never guess numbers you cannot read; skip unreadable records. If the date is not visible use "". If the year is missing, assume the year of today's date, unless that puts the date after today, then use the previous year. "source" = the short text/numbers you actually read for that record. "note" = "" unless something is ambiguous (write it briefly in Korean). If the screenshot has nothing relevant, return an empty items array.`;
-
-  // 긴 변 1600px 이하 JPEG로 줄여 전송량을 줄인다 (폰 스크린샷은 수 MB)
-  async function toJpegBase64(file) {
-    const bmp = await createImageBitmap(file);
-    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-    const c = document.createElement('canvas');
-    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-    return c.toDataURL('image/jpeg', 0.92).split(',')[1];
-  }
-
-  async function callClaude(ai, content) {
-    const haiku = /haiku/.test(ai.model); // Haiku 4.5는 effort·폴백 옵션을 지원하지 않는다
-    const post = (withFallback) => fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': ai.key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        ...(withFallback ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
-      },
-      body: JSON.stringify({
-        model: ai.model,
-        max_tokens: 4096,
-        system: SHOT_SYSTEM,
-        messages: [{ role: 'user', content }],
-        output_config: { ...(haiku ? {} : { effort: 'medium' }), format: { type: 'json_schema', schema: SHOT_SCHEMA } },
-        ...(withFallback ? { fallbacks: 'default' } : {}),
-      }),
-    });
-    let r = await post(!haiku);
-    if (r.status === 400 && !haiku) r = await post(false); // 폴백 옵션이 거부되면 옵션 없이 한 번 더
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const msg = (j.error && j.error.message) || '';
-      if (r.status === 401) throw new Error('API 키가 올바르지 않아요. 설정에서 다시 확인하세요.');
-      if (r.status === 429) throw new Error('요청이 너무 많아요. 잠시 후 다시 시도하세요.');
-      if (r.status === 402 || /credit|billing/i.test(msg)) throw new Error('API 크레딧이 부족해요. Anthropic 콘솔에서 확인하세요.');
-      throw new Error(`요청 실패 (${r.status}) ${msg}`);
+  function parseBinanceText(raw) {
+    const text = String(raw).replace(/[−–—]/g, '-').replace(/ /g, ' ');
+    // 1) 손익 상세 팝업: "Realized PNL" 뒤에 "(USDT)" 라벨이 오지 않는 첫 지점부터. 값 순서는 실현/청산손익/펀딩비/거래수수료/보험청산수수료
+    let body = text, bd = null;
+    const bi = text.search(/Realized\s+PNL(?!\s*\()/i);
+    if (bi >= 0) {
+      const vals = [...text.slice(bi).matchAll(/([+-]?\d[\d,]*(?:\.\d+)?)\s*USDT/gi)].map((m) => toNum(m[1]));
+      if (vals.length >= 4) {
+        bd = { realized: vals[0], closing: vals[1], funding: vals[2], fee: vals[3], ins: vals[4] || 0, used: false };
+        body = text.slice(0, bi);
+      }
     }
-    if (j.stop_reason === 'refusal') throw new Error('이미지를 처리할 수 없다고 응답했어요.');
-    if (j.stop_reason === 'max_tokens') throw new Error('응답이 잘렸어요. 스크린샷을 나눠서 올려보세요.');
-    const block = (j.content || []).find((b) => b.type === 'text');
-    if (!block) throw new Error('응답에서 결과를 찾지 못했어요.');
-    return JSON.parse(block.text).items || [];
+    // 2) 포지션 카드: 심볼(SUIUSDT) 단위로 자르고, 카드 안에서 값을 찾는다
+    const syms = [...body.matchAll(/\b([A-Z0-9]{2,15})(USDT|USDC|BUSD)\b/g)];
+    const items = syms.map((m, i) => {
+      const chunk = body.slice(m.index + m[0].length, i + 1 < syms.length ? syms[i + 1].index : body.length);
+      const dts = chunk.match(DT) || [];
+      const words = chunk.replace(DT, ' ').split(/\s+/).filter(Boolean);
+      const first = words.find((w) => NUM.test(w) || w === '--'); // 카드에서 가장 먼저 나오는 숫자가 실현 손익
+      const coin = m[1].replace(/^1000+/, '');
+      const it = { coin, amount: null, date: '', funding: null, fee: null, note: '', source: `${m[0]} ${first || ''}`.trim() };
+      if (!first || first === '--') { it.note = '실현 손익을 읽지 못했어요 (2026년 이전 포지션은 "--"로 표시돼요)'; return it; }
+      it.amount = toNum(first);
+      if (!words.some((w) => /%$/.test(w))) it.note = 'ROI를 찾지 못했어요. 손익 값을 꼭 확인하세요';
+      if (dts.length >= 2) it.date = dts.slice().sort().pop().slice(0, 10); // 종료 시각은 시작 시각보다 늦다
+      else it.note = (it.note ? it.note + ' / ' : '') + '종료 날짜를 못 찾았어요';
+      return it;
+    });
+    // 3) 상세 팝업의 펀딩비·수수료를 실현 손익이 같은 카드에 붙인다
+    if (bd) {
+      const hit = items.find((it) => it.amount !== null && Math.abs(it.amount - bd.realized) < 0.011);
+      const target = hit || { coin: '', amount: bd.realized, date: '', funding: null, fee: null, note: '손익 상세만 있어요. 코인과 날짜를 직접 고르세요', source: 'Realized PNL 상세' };
+      target.funding = bd.funding; target.fee = bd.fee;
+      if (Math.abs(bd.closing + bd.funding + bd.fee + bd.ins - bd.realized) > 0.05) target.note = (target.note ? target.note + ' / ' : '') + '상세 항목 합계가 실현 손익과 달라요';
+      if (!hit) items.push(target);
+    }
+    return items;
   }
 
-  let shot = null; // { busy, error, items }
+  let shot = null; // { error, items }
+  let pasteDraft = '';
   const dateKey = (it) => it.date || today();
   const sortShot = () => { shot.items.sort((a, b) => (dateKey(a) < dateKey(b) ? -1 : dateKey(a) > dateKey(b) ? 1 : 0)); };
   const round2 = (x) => Math.round(x * 100) / 100;
 
-  async function runShot(files) {
-    const ai = getAI();
-    shot = { busy: true, error: '', items: null };
-    render();
-    try {
-      const content = [];
-      for (const f of files) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await toJpegBase64(f) } });
-      content.push({ type: 'text', text: `Today's date: ${today()}. Coins tracked in the app: ${db.coins.map((c) => c.sym).join(', ') || '(none)'}. Extract the records from the screenshot(s).` });
-      const items = await callClaude(ai, content);
-      shot = {
-        busy: false, error: '',
-        items: items.map((x) => {
-          const sym = String(x.coin || '').toUpperCase().replace(/(USDT|USDC|BUSD|USD)(PERP)?$/, '').replace(/^1000+/, '');
-          const it = { on: true, kind: x.kind, coin: findCoin(sym) ? sym : '', amount: x.amount, date: /^\d{4}-\d{2}-\d{2}$/.test(x.date) ? x.date : '', np: false, note: x.note || '', source: x.source || '' };
-          if (it.kind === 'trade' && !it.coin) it.on = false; // 코인을 못 맞췄으면 직접 고르기 전엔 저장하지 않는다
-          return it;
-        }),
-      };
-      sortShot();
-      markDup();
-    } catch (e) {
-      shot = { busy: false, error: e instanceof TypeError ? '네트워크 연결을 확인하세요. (인터넷 또는 브라우저 차단 가능성)' : e.message, items: null };
+  function runPaste(text) {
+    const items = parseBinanceText(text).filter((x) => x.amount !== null || x.note);
+    if (!items.length) {
+      shot = { error: '읽을 수 있는 기록을 찾지 못했어요. SUIUSDT 같은 코인 이름과 Realized PNL이 들어 있는 텍스트인지 확인하세요.', items: null };
+      return render();
     }
+    shot = {
+      error: '',
+      items: items.map((x) => {
+        const coin = findCoin(x.coin.toUpperCase()) ? x.coin.toUpperCase() : '';
+        const bad = x.amount === null;
+        return { on: !bad && !!coin, coin, amount: bad ? 0 : x.amount, date: x.date, funding: x.funding, fee: x.fee, note: x.note, source: x.source };
+      }),
+    };
+    sortShot();
+    markDup();
     render();
   }
 
   // 같은 코인·날짜·손익의 거래 기록이 이미 있으면 중복으로 보고 기본 해제
   function isDup(it) {
-    if (it.kind !== 'trade') return false;
     const c = findCoin(it.coin);
     if (!c || !it.date) return false;
     return coinStats(c).rows.some((r) => r.pnlEvent && r.date === it.date && r.delta !== null && Math.abs(r.delta - it.amount) < 0.005);
@@ -283,7 +229,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
   function planShot(items) {
     const run = {};
     return items.map((it) => {
-      if (!it.on || it.kind !== 'trade') return null;
+      if (!it.on) return null;
       const c = findCoin(it.coin);
       if (!c) return null;
       const before = run[c.sym] !== undefined ? run[c.sym] : (seedAt(c, dateKey(it)) || 0);
@@ -307,66 +253,52 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
     const plans = planShot(shot.items);
     let n = 0;
     shot.items.forEach((it, i) => {
-      if (!it.on) return;
-      if (it.kind === 'trade' && plans[i]) {
-        insertEvent(findCoin(it.coin), { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note || undefined });
-        n++;
-      } else if (it.kind === 'balance') {
-        db.snapshots.push({ id: nid(), date: dateKey(it), balance: +it.amount, np: !!it.np, after: false, note: it.note || '' });
-        n++;
-      }
+      if (!it.on || !plans[i]) return;
+      const ev = { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note && /^(상세|ROI|종료)/.test(it.note) ? undefined : (it.note || undefined) };
+      if (it.funding !== null && it.funding !== undefined && it.funding !== '') ev.funding = +it.funding;
+      if (it.fee !== null && it.fee !== undefined && it.fee !== '') ev.fee = +it.fee;
+      insertEvent(findCoin(it.coin), ev);
+      n++;
     });
-    shot = null;
+    shot = null; pasteDraft = '';
     commit();
     alert(`${n}건 저장했어요.`);
   }
 
+  const optNum = (x) => (x === null || x === undefined ? '' : x);
+
   function shotCard() {
-    const ai = getAI();
-    const head = '<h2>📷 스크린샷으로 입력</h2>';
-    if (!ai.key) return `<section class="card">${head}<p class="hint">설정 탭에서 Claude API 키를 먼저 등록하세요.</p><button class="btn" data-tab="set">설정으로 이동</button></section>`;
-    if (shot && shot.busy) return `<section class="card">${head}<p class="hint">스크린샷을 읽는 중이에요… (10~30초)</p></section>`;
+    const head = '<h2>📋 텍스트로 입력 (바이낸스)</h2>';
     if (shot && shot.items) {
       const plans = planShot(shot.items);
       const rows = shot.items.map((it, i) => {
-        const dup = isDup(it);
         const pv = plans[i];
         return `<div class="shotrow${it.on ? '' : ' off'}">
           <div class="grid2"><label class="chk"><input type="checkbox" data-sf="on" data-i="${i}"${it.on ? ' checked' : ''}> 저장</label>
-          <select data-sf="kind" data-i="${i}"><option value="trade"${it.kind === 'trade' ? ' selected' : ''}>코인 거래 손익</option><option value="balance"${it.kind === 'balance' ? ' selected' : ''}>총 시드</option></select></div>
+          <label><select data-sf="coin" data-i="${i}"><option value="">코인 선택</option>${db.coins.map((c) => `<option${c.sym === it.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label></div>
           <div class="grid2">
-            ${it.kind === 'trade' ? `<label>코인<select data-sf="coin" data-i="${i}"><option value="">선택</option>${db.coins.map((c) => `<option${c.sym === it.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label>` : '<span></span>'}
-            <label>${it.kind === 'trade' ? '실현 손익($)' : '잔고($)'}<input type="number" step="any" data-sf="amount" data-i="${i}" value="${it.amount}" inputmode="decimal"></label>
+            <label>실현 손익($)<input type="number" step="any" data-sf="amount" data-i="${i}" value="${it.amount}" inputmode="decimal"></label>
             <label>날짜<input type="date" data-sf="date" data-i="${i}" value="${val(it.date)}"></label>
-            ${it.kind === 'balance' ? `<label class="chk"><input type="checkbox" data-sf="np" data-i="${i}"${it.np ? ' checked' : ''}> 포지션 없음(np)</label>` : '<span></span>'}
+            <label>펀딩비($)<input type="number" step="any" data-sf="funding" data-i="${i}" value="${optNum(it.funding)}" inputmode="decimal"></label>
+            <label>거래수수료($)<input type="number" step="any" data-sf="fee" data-i="${i}" value="${optNum(it.fee)}" inputmode="decimal"></label>
           </div>
           ${pv ? `<div class="hint">${esc(it.coin)} 시드 ${num(pv.before)} → <b>${num(pv.after)}</b></div>` : ''}
-          ${dup ? '<div class="hint warn">⚠ 같은 날짜·손익의 기록이 이미 있어요 (중복이면 저장하지 마세요)</div>' : ''}
-          ${it.kind === 'trade' && !it.coin ? '<div class="hint warn">⚠ 코인을 선택해야 저장할 수 있어요</div>' : ''}
-          ${!it.date ? '<div class="hint warn">날짜를 못 읽었어요. 비워두면 오늘 날짜로 저장돼요.</div>' : ''}
+          ${isDup(it) ? '<div class="hint warn">⚠ 같은 날짜·손익의 기록이 이미 있어요 (중복이면 저장하지 마세요)</div>' : ''}
+          ${!it.coin ? '<div class="hint warn">⚠ 코인을 선택해야 저장할 수 있어요</div>' : ''}
+          ${!it.date ? '<div class="hint warn">날짜가 비어 있어요. 비워두면 오늘 날짜로 저장돼요.</div>' : ''}
           ${it.note ? `<div class="hint warn">${esc(it.note)}</div>` : ''}
           <div class="hint">읽은 내용: ${esc(it.source)}</div></div>`;
       }).join('');
-      const okCount = shot.items.filter((it) => it.on && (it.kind === 'balance' || it.coin)).length;
-      return `<section class="card">${head}
-        ${shot.items.length ? `<p class="hint">AI가 읽은 결과예요. <b>숫자를 꼭 확인</b>하고 저장하세요.</p>${rows}
-        <button class="btn" data-act="shotsave"${okCount ? '' : ' disabled'}>${okCount}건 저장</button>` : '<p class="hint">읽을 수 있는 기록을 찾지 못했어요.</p>'}
+      const okCount = shot.items.filter((it) => it.on && it.coin).length;
+      return `<section class="card">${head}<p class="hint">읽은 결과예요. <b>숫자를 꼭 확인</b>하고 저장하세요.</p>${rows}
+        <button class="btn" data-act="shotsave"${okCount ? '' : ' disabled'}>${okCount}건 저장</button>
         <button class="btn alt" data-act="shotcancel">닫기</button></section>`;
     }
     return `<section class="card">${head}
-      ${shot && shot.error ? `<p class="hint warn">⚠ ${esc(shot.error)}</p>` : '<p class="hint">포지션 결과 스크린샷을 올리면 코인별 손익을 읽어 시드에 반영해요. 저장 전에 확인 화면이 나와요.</p>'}
-      <label class="btn">스크린샷 선택<input type="file" accept="image/*" multiple hidden id="shotfile"></label></section>`;
-  }
-
-  function aiCard() {
-    const ai = getAI();
-    return `<section class="card"><h2>스크린샷 입력 (Claude API)</h2>
-      <form class="form" data-form="ai">
-        <label>API 키<input type="password" name="key" value="${val(ai.key)}" placeholder="sk-ant-..." autocomplete="off" autocapitalize="off"></label>
-        <label>모델<select name="model">${Object.entries(AI_MODELS).map(([id, l]) => `<option value="${id}"${ai.model === id ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
-        <button class="btn">저장</button></form>
-      ${ai.key ? '<button class="btn danger" data-act="aidel">API 키 삭제</button>' : ''}
-      <p class="hint">키는 <b>이 폰의 브라우저에만</b> 저장되고, JSON 백업에는 포함되지 않아요. 스크린샷은 입력할 때만 Anthropic으로 전송돼요. 이 앱 전용 키를 새로 만들고 콘솔에서 월 사용 한도를 걸어두길 권해요.</p></section>`;
+      ${shot && shot.error ? `<p class="hint warn">⚠ ${esc(shot.error)}</p>` : ''}
+      <p class="hint">① 바이낸스 Position History 스크린샷 (손익 상세 팝업을 열어 찍으면 펀딩비·수수료까지) → ② 갤러리에서 열어 글자 추출(T 아이콘)로 복사 → ③ 아래에 붙여넣기</p>
+      <textarea id="pastebox" rows="5" placeholder="여기에 붙여넣기">${esc(pasteDraft)}</textarea>
+      <button class="btn" data-act="parse">읽기</button></section>`;
   }
 
   // ---------- 화면 ----------
@@ -423,6 +355,10 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
       ${s.hasEst ? '<p class="hint">※ 추정 입금액이 포함돼 있어요 (기록 탭에서 확인).</p>' : ''}
     </section>
 
+    ${(() => {
+      const f = db.coins.reduce((a, c) => { const t = coinStats(c); return { fund: a.fund + t.fund, fee: a.fee + t.fee }; }, { fund: 0, fee: 0 });
+      return f.fund || f.fee ? `<section class="card"><h2>펀딩비 · 수수료 <small class="muted">(기록된 거래 합계)</small></h2><div class="row3"><div><div class="label">펀딩비</div><div class="v ${cls(f.fund)}">${signed(f.fund, 2)}$</div></div><div><div class="label">거래수수료</div><div class="v ${cls(f.fee)}">${signed(f.fee, 2)}$</div></div><div><div class="label">합계</div><div class="v ${cls(f.fund + f.fee)}">${signed(f.fund + f.fee, 2)}$</div></div></div><p class="hint">실현 손익에는 이미 포함된 값이에요. 참고용으로만 보여줘요.</p></section>` : '';
+    })()}
     <section class="card">
       <h2>총 시드 추이 <small class="muted">(입출금 미반영)</small></h2>
       ${lineChart([{ name: '바이낸스 USD', color: 'var(--c1)', pts: snaps().map((r) => [T(r.date), r.balance]) }])}
@@ -441,6 +377,8 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
         <label>날짜<input type="date" name="date" value="${e ? val(e.date) : today()}"></label>
         <label>변경 후 시드($)<input type="number" step="any" name="seed" value="${e ? e.seed : ''}" required inputmode="decimal"></label>
         <label>출금액($, 출금일 때)<input type="number" step="any" name="amount" value="${e ? val(e.amount) : ''}" inputmode="decimal"></label>
+        <label>펀딩비($, 지출은 −)<input type="number" step="any" name="funding" value="${e ? val(e.funding) : ''}" inputmode="decimal"></label>
+        <label>거래수수료($, 지출은 −)<input type="number" step="any" name="fee" value="${e ? val(e.fee) : ''}" inputmode="decimal"></label>
       </div>
       <label>메모<input name="note" value="${e ? val(e.note) : ''}"></label>
       <button class="btn">저장</button>${cancelBtn(e)}</form>`;
@@ -489,6 +427,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
           <div><div class="label">출금 표기</div><div>${usd(st.wd)}</div></div>
           <div><div class="label">기록 수</div><div>${c.events.length}</div></div>
         </div>
+        ${st.fund || st.fee ? `<div class="row3 mini"><div><div class="label">펀딩비 합</div><div class="${cls(st.fund)}">${signed(st.fund, 2)}</div></div><div><div class="label">거래수수료 합</div><div class="${cls(st.fee)}">${signed(st.fee, 2)}</div></div><div></div></div>` : ''}
         ${isOpen ? `
           <button class="link" data-act="addev" data-coin="${esc(c.sym)}">${formOpen['ev' + c.sym] ? '닫기' : '+ 기록 추가'}</button>
           <button class="link" data-act="lev" data-coin="${esc(c.sym)}">레버리지 변경</button>
@@ -496,7 +435,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
           <ul class="list">${[...st.rows].reverse().map((e) => isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : `
             <li><span class="d">${short(e.date)}</span>
             <span class="badge b-${e.type}">${TYPE_LABEL[e.type]}</span>
-            <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}</span>
+            <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}${e.funding || e.fee ? `<br><small class="muted">${e.funding ? `펀딩 ${signed(e.funding, 2)}` : ''}${e.funding && e.fee ? ' · ' : ''}${e.fee ? `수수료 ${signed(e.fee, 2)}` : ''}</small>` : ''}</span>
             <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : signed(e.delta)}</span>
             ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button></li>`).join('')}
           </ul>
@@ -530,7 +469,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
   }
 
   function viewSet() {
-    return aiCard() + `<section class="card"><h2>백업 · 복원</h2>
+    return `<section class="card"><h2>백업 · 복원</h2>
       <p class="hint">데이터는 이 기기 브라우저에만 저장됩니다. 주기적으로 내보내기 하세요.</p>
       <button class="btn" data-act="export">JSON 내보내기</button>
       <label class="btn alt">JSON 가져오기<input type="file" accept="application/json" id="imp" hidden></label>
@@ -581,9 +520,9 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
         db.coins.push({ sym, lev, weight: 0, events: [{ id: nid(), seed, date: today(), type: 'i' }] });
         openCoin = sym; commit();
       }
-      if (d.act === 'shotcancel') { shot = null; render(); }
+      if (d.act === 'shotcancel') { shot = null; pasteDraft = ''; render(); }
       if (d.act === 'shotsave') saveShot();
-      if (d.act === 'aidel' && confirm('저장된 API 키를 삭제할까요?')) { const a = getAI(); delete a.key; setAI(a); render(); }
+      if (d.act === 'parse') runPaste($('#pastebox').value);
       if (d.act === 'export') {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }));
@@ -602,11 +541,6 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
     ev.preventDefault();
     const v = Object.fromEntries(new FormData(f));
     const kind = f.dataset.form;
-    if (kind === 'ai') {
-      setAI({ key: (v.key || '').trim() || undefined, model: AI_MODELS[v.model] ? v.model : AI_DEFAULT });
-      render(); alert('저장했어요.');
-      return;
-    }
     const id = f.dataset.id;
     editing = null;
     if (kind === 'event') {
@@ -615,6 +549,7 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
       const old = { type: e.type, date: e.date, amount: e.amount };
       Object.assign(e, { seed: +v.seed, date: v.date || null, type: v.type, note: v.note || undefined });
       if (v.type === 'w') e.amount = +v.amount || 0; else delete e.amount;
+      for (const k of ['funding', 'fee']) { if (v[k] === '' || v[k] === undefined) delete e[k]; else e[k] = +v[k]; }
       if (v.type === 'w' && e.amount) {
         // 총 시드 출금과 연결: 기존 짝이 있으면 같이 수정, 없으면 새로 만든다
         const link = old.type === 'w' && db.flows.find((x) => x.type === 'out' && x.date === old.date && x.usd === old.amount);
@@ -652,20 +587,15 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
   });
 
   document.addEventListener('change', (ev) => {
-    if (ev.target.id === 'shotfile') {
-      const files = [...ev.target.files].slice(0, 5);
-      if (files.length) runShot(files);
-      return;
-    }
     const sf = ev.target.dataset.sf;
     if (sf && shot && shot.items) {
       const it = shot.items[+ev.target.dataset.i];
       const t = ev.target;
-      if (sf === 'on' || sf === 'np') it[sf] = t.checked;
+      if (sf === 'on') it.on = t.checked;
       else if (sf === 'amount') it.amount = parseFloat(t.value) || 0;
+      else if (sf === 'funding' || sf === 'fee') it[sf] = t.value === '' ? null : parseFloat(t.value);
       else it[sf] = t.value;
-      if (sf === 'kind' && it.kind === 'trade' && !it.coin) it.on = false;
-      if (sf === 'coin' && it.coin) it.on = true;
+      if (sf === 'coin') it.on = !!it.coin;
       sortShot();
       render();
       return;
@@ -684,6 +614,9 @@ Rules: ignore unrealized PnL of still-open positions. Never guess numbers you ca
       } catch (e) { alert('가져오기 실패: ' + e.message); }
     });
   });
+
+  document.addEventListener('input', (ev) => { if (ev.target.id === 'pastebox') pasteDraft = ev.target.value; });
+  try { localStorage.removeItem('invest.ai'); } catch (e) { /* 이전 버전의 API 키 잔여분 삭제 */ }
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   render();
