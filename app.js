@@ -145,6 +145,224 @@
   }
   const T = (d) => new Date(d).getTime();
 
+
+  // ---------- 스크린샷 입력 (Claude API) ----------
+  // API 키는 백업 JSON에 들어가지 않도록 데이터(db)와 분리해서 저장한다.
+  const AI_KEY = 'invest.ai';
+  const AI_MODELS = { 'claude-opus-5-5': 'Claude Opus 5.5 (기본, 정확)', 'claude-sonnet-5-5': 'Claude Sonnet 5.5 (더 저렴)' };
+  function getAI() {
+    try { return { model: 'claude-opus-5-5', ...(JSON.parse(localStorage.getItem(AI_KEY)) || {}) }; } catch (e) { return { model: 'claude-opus-5-5' }; }
+  }
+  function setAI(v) {
+    try { localStorage.setItem(AI_KEY, JSON.stringify(v)); } catch (e) { /* ignore */ }
+  }
+
+  const SHOT_SCHEMA = {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['trade', 'balance'] },
+            coin: { type: 'string' },
+            amount: { type: 'number' },
+            date: { type: 'string' },
+            note: { type: 'string' },
+            source: { type: 'string' },
+          },
+          required: ['kind', 'coin', 'amount', 'date', 'note', 'source'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['items'],
+    additionalProperties: false,
+  };
+
+  const SHOT_SYSTEM = `You read screenshots from a crypto exchange app (mainly Binance USDⓈ-M futures) and extract records for a personal trading log.
+Return one record per item:
+- kind "trade": a closed / realized position result. amount = realized PnL in USD(T), signed (a loss is negative). coin = base asset ticker in uppercase (BTCUSDT -> BTC, 1000PEPEUSDT -> PEPE). date = the closing date as YYYY-MM-DD.
+- kind "balance": an account / wallet total balance screen. amount = total balance in USD (exclude unrealized PnL when the screen separates it). coin = "".
+Rules: ignore unrealized PnL of still-open positions. Never guess numbers you cannot read; skip unreadable records. If the date is not visible use "". If the year is missing, assume the year of today's date, unless that puts the date after today, then use the previous year. "source" = the short text/numbers you actually read for that record. "note" = "" unless something is ambiguous (write it briefly in Korean). If the screenshot has nothing relevant, return an empty items array.`;
+
+  // 긴 변 1600px 이하 JPEG로 줄여 전송량을 줄인다 (폰 스크린샷은 수 MB)
+  async function toJpegBase64(file) {
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.92).split(',')[1];
+  }
+
+  async function callClaude(ai, content) {
+    const post = (withFallback) => fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': ai.key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        ...(withFallback ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+      },
+      body: JSON.stringify({
+        model: ai.model,
+        max_tokens: 4096,
+        system: SHOT_SYSTEM,
+        messages: [{ role: 'user', content }],
+        output_config: { effort: 'medium', format: { type: 'json_schema', schema: SHOT_SCHEMA } },
+        ...(withFallback ? { fallbacks: 'default' } : {}),
+      }),
+    });
+    let r = await post(true);
+    if (r.status === 400) r = await post(false); // 폴백 옵션이 거부되면 옵션 없이 한 번 더
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = (j.error && j.error.message) || '';
+      if (r.status === 401) throw new Error('API 키가 올바르지 않아요. 설정에서 다시 확인하세요.');
+      if (r.status === 429) throw new Error('요청이 너무 많아요. 잠시 후 다시 시도하세요.');
+      if (r.status === 402 || /credit|billing/i.test(msg)) throw new Error('API 크레딧이 부족해요. Anthropic 콘솔에서 확인하세요.');
+      throw new Error(`요청 실패 (${r.status}) ${msg}`);
+    }
+    if (j.stop_reason === 'refusal') throw new Error('이미지를 처리할 수 없다고 응답했어요.');
+    if (j.stop_reason === 'max_tokens') throw new Error('응답이 잘렸어요. 스크린샷을 나눠서 올려보세요.');
+    const block = (j.content || []).find((b) => b.type === 'text');
+    if (!block) throw new Error('응답에서 결과를 찾지 못했어요.');
+    return JSON.parse(block.text).items || [];
+  }
+
+  let shot = null; // { busy, error, items }
+  const dateKey = (it) => it.date || today();
+  const sortShot = () => { shot.items.sort((a, b) => (dateKey(a) < dateKey(b) ? -1 : dateKey(a) > dateKey(b) ? 1 : 0)); };
+  const round2 = (x) => Math.round(x * 100) / 100;
+
+  async function runShot(files) {
+    const ai = getAI();
+    shot = { busy: true, error: '', items: null };
+    render();
+    try {
+      const content = [];
+      for (const f of files) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await toJpegBase64(f) } });
+      content.push({ type: 'text', text: `Today's date: ${today()}. Coins tracked in the app: ${db.coins.map((c) => c.sym).join(', ') || '(none)'}. Extract the records from the screenshot(s).` });
+      const items = await callClaude(ai, content);
+      shot = {
+        busy: false, error: '',
+        items: items.map((x) => {
+          const sym = String(x.coin || '').toUpperCase().replace(/(USDT|USDC|BUSD|USD)(PERP)?$/, '').replace(/^1000+/, '');
+          const it = { on: true, kind: x.kind, coin: findCoin(sym) ? sym : '', amount: x.amount, date: /^\d{4}-\d{2}-\d{2}$/.test(x.date) ? x.date : '', np: false, note: x.note || '', source: x.source || '' };
+          if (it.kind === 'trade' && !it.coin) it.on = false; // 코인을 못 맞췄으면 직접 고르기 전엔 저장하지 않는다
+          return it;
+        }),
+      };
+      sortShot();
+      markDup();
+    } catch (e) {
+      shot = { busy: false, error: e instanceof TypeError ? '네트워크 연결을 확인하세요. (인터넷 또는 브라우저 차단 가능성)' : e.message, items: null };
+    }
+    render();
+  }
+
+  // 같은 코인·날짜·손익의 거래 기록이 이미 있으면 중복으로 보고 기본 해제
+  function isDup(it) {
+    if (it.kind !== 'trade') return false;
+    const c = findCoin(it.coin);
+    if (!c || !it.date) return false;
+    return coinStats(c).rows.some((r) => r.pnlEvent && r.date === it.date && r.delta !== null && Math.abs(r.delta - it.amount) < 0.005);
+  }
+  function markDup() { shot.items.forEach((it) => { if (isDup(it)) it.on = false; }); }
+
+  // 선택된 거래를 날짜순으로 이어 붙였을 때 코인별 시드 변화
+  function planShot(items) {
+    const run = {};
+    return items.map((it) => {
+      if (!it.on || it.kind !== 'trade') return null;
+      const c = findCoin(it.coin);
+      if (!c) return null;
+      const before = run[c.sym] !== undefined ? run[c.sym] : (seedAt(c, dateKey(it)) || 0);
+      const after = round2(before + (+it.amount || 0));
+      run[c.sym] = after;
+      return { before, after };
+    });
+  }
+
+  function insertEvent(c, ev) {
+    let idx = 0;
+    for (let k = c.events.length - 1; k >= 0; k--) {
+      const d = c.events[k].date;
+      if (!d || d <= ev.date) { idx = k + 1; break; }
+    }
+    c.events.splice(idx, 0, ev);
+  }
+
+  function saveShot() {
+    sortShot();
+    const plans = planShot(shot.items);
+    let n = 0;
+    shot.items.forEach((it, i) => {
+      if (!it.on) return;
+      if (it.kind === 'trade' && plans[i]) {
+        insertEvent(findCoin(it.coin), { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note || undefined });
+        n++;
+      } else if (it.kind === 'balance') {
+        db.snapshots.push({ id: nid(), date: dateKey(it), balance: +it.amount, np: !!it.np, after: false, note: it.note || '' });
+        n++;
+      }
+    });
+    shot = null;
+    commit();
+    alert(`${n}건 저장했어요.`);
+  }
+
+  function shotCard() {
+    const ai = getAI();
+    const head = '<h2>📷 스크린샷으로 입력</h2>';
+    if (!ai.key) return `<section class="card">${head}<p class="hint">설정 탭에서 Claude API 키를 먼저 등록하세요.</p><button class="btn" data-tab="set">설정으로 이동</button></section>`;
+    if (shot && shot.busy) return `<section class="card">${head}<p class="hint">스크린샷을 읽는 중이에요… (10~30초)</p></section>`;
+    if (shot && shot.items) {
+      const plans = planShot(shot.items);
+      const rows = shot.items.map((it, i) => {
+        const dup = isDup(it);
+        const pv = plans[i];
+        return `<div class="shotrow${it.on ? '' : ' off'}">
+          <div class="grid2"><label class="chk"><input type="checkbox" data-sf="on" data-i="${i}"${it.on ? ' checked' : ''}> 저장</label>
+          <select data-sf="kind" data-i="${i}"><option value="trade"${it.kind === 'trade' ? ' selected' : ''}>코인 거래 손익</option><option value="balance"${it.kind === 'balance' ? ' selected' : ''}>총 시드</option></select></div>
+          <div class="grid2">
+            ${it.kind === 'trade' ? `<label>코인<select data-sf="coin" data-i="${i}"><option value="">선택</option>${db.coins.map((c) => `<option${c.sym === it.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label>` : '<span></span>'}
+            <label>${it.kind === 'trade' ? '실현 손익($)' : '잔고($)'}<input type="number" step="any" data-sf="amount" data-i="${i}" value="${it.amount}" inputmode="decimal"></label>
+            <label>날짜<input type="date" data-sf="date" data-i="${i}" value="${val(it.date)}"></label>
+            ${it.kind === 'balance' ? `<label class="chk"><input type="checkbox" data-sf="np" data-i="${i}"${it.np ? ' checked' : ''}> 포지션 없음(np)</label>` : '<span></span>'}
+          </div>
+          ${pv ? `<div class="hint">${esc(it.coin)} 시드 ${num(pv.before)} → <b>${num(pv.after)}</b></div>` : ''}
+          ${dup ? '<div class="hint warn">⚠ 같은 날짜·손익의 기록이 이미 있어요 (중복이면 저장하지 마세요)</div>' : ''}
+          ${it.kind === 'trade' && !it.coin ? '<div class="hint warn">⚠ 코인을 선택해야 저장할 수 있어요</div>' : ''}
+          ${!it.date ? '<div class="hint warn">날짜를 못 읽었어요. 비워두면 오늘 날짜로 저장돼요.</div>' : ''}
+          ${it.note ? `<div class="hint warn">${esc(it.note)}</div>` : ''}
+          <div class="hint">읽은 내용: ${esc(it.source)}</div></div>`;
+      }).join('');
+      const okCount = shot.items.filter((it) => it.on && (it.kind === 'balance' || it.coin)).length;
+      return `<section class="card">${head}
+        ${shot.items.length ? `<p class="hint">AI가 읽은 결과예요. <b>숫자를 꼭 확인</b>하고 저장하세요.</p>${rows}
+        <button class="btn" data-act="shotsave"${okCount ? '' : ' disabled'}>${okCount}건 저장</button>` : '<p class="hint">읽을 수 있는 기록을 찾지 못했어요.</p>'}
+        <button class="btn alt" data-act="shotcancel">닫기</button></section>`;
+    }
+    return `<section class="card">${head}
+      ${shot && shot.error ? `<p class="hint warn">⚠ ${esc(shot.error)}</p>` : '<p class="hint">포지션 결과 스크린샷을 올리면 코인별 손익을 읽어 시드에 반영해요. 저장 전에 확인 화면이 나와요.</p>'}
+      <label class="btn">스크린샷 선택<input type="file" accept="image/*" multiple hidden id="shotfile"></label></section>`;
+  }
+
+  function aiCard() {
+    const ai = getAI();
+    return `<section class="card"><h2>스크린샷 입력 (Claude API)</h2>
+      <form class="form" data-form="ai">
+        <label>API 키<input type="password" name="key" value="${val(ai.key)}" placeholder="sk-ant-..." autocomplete="off" autocapitalize="off"></label>
+        <label>모델<select name="model">${Object.entries(AI_MODELS).map(([id, l]) => `<option value="${id}"${ai.model === id ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <button class="btn">저장</button></form>
+      ${ai.key ? '<button class="btn danger" data-act="aidel">API 키 삭제</button>' : ''}
+      <p class="hint">키는 <b>이 폰의 브라우저에만</b> 저장되고, JSON 백업에는 포함되지 않아요. 스크린샷은 입력할 때만 Anthropic으로 전송돼요. 이 앱 전용 키를 새로 만들고 콘솔에서 월 사용 한도를 걸어두길 권해요.</p></section>`;
+  }
+
   // ---------- 화면 ----------
   function viewSum() {
     if (!db.snapshots.length) {
@@ -251,7 +469,7 @@
 
   function viewCoins() {
     const total = db.coins.reduce((a, c) => a + curSeed(c), 0);
-    return db.coins.map((c) => {
+    return shotCard() + db.coins.map((c) => {
       const st = coinStats(c);
       const cur = curSeed(c);
       const isOpen = openCoin === c.sym;
@@ -306,7 +524,7 @@
   }
 
   function viewSet() {
-    return `<section class="card"><h2>백업 · 복원</h2>
+    return aiCard() + `<section class="card"><h2>백업 · 복원</h2>
       <p class="hint">데이터는 이 기기 브라우저에만 저장됩니다. 주기적으로 내보내기 하세요.</p>
       <button class="btn" data-act="export">JSON 내보내기</button>
       <label class="btn alt">JSON 가져오기<input type="file" accept="application/json" id="imp" hidden></label>
@@ -357,6 +575,9 @@
         db.coins.push({ sym, lev, weight: 0, events: [{ id: nid(), seed, date: today(), type: 'i' }] });
         openCoin = sym; commit();
       }
+      if (d.act === 'shotcancel') { shot = null; render(); }
+      if (d.act === 'shotsave') saveShot();
+      if (d.act === 'aidel' && confirm('저장된 API 키를 삭제할까요?')) { const a = getAI(); delete a.key; setAI(a); render(); }
       if (d.act === 'export') {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }));
@@ -375,6 +596,11 @@
     ev.preventDefault();
     const v = Object.fromEntries(new FormData(f));
     const kind = f.dataset.form;
+    if (kind === 'ai') {
+      setAI({ key: (v.key || '').trim() || undefined, model: AI_MODELS[v.model] ? v.model : 'claude-opus-5-5' });
+      render(); alert('저장했어요.');
+      return;
+    }
     const id = f.dataset.id;
     editing = null;
     if (kind === 'event') {
@@ -420,6 +646,24 @@
   });
 
   document.addEventListener('change', (ev) => {
+    if (ev.target.id === 'shotfile') {
+      const files = [...ev.target.files].slice(0, 5);
+      if (files.length) runShot(files);
+      return;
+    }
+    const sf = ev.target.dataset.sf;
+    if (sf && shot && shot.items) {
+      const it = shot.items[+ev.target.dataset.i];
+      const t = ev.target;
+      if (sf === 'on' || sf === 'np') it[sf] = t.checked;
+      else if (sf === 'amount') it.amount = parseFloat(t.value) || 0;
+      else it[sf] = t.value;
+      if (sf === 'kind' && it.kind === 'trade' && !it.coin) it.on = false;
+      if (sf === 'coin' && it.coin) it.on = true;
+      sortShot();
+      render();
+      return;
+    }
     if (ev.target.id === 'base') { db.baseline = ev.target.value; commit(); return; }
     if (ev.target.id !== 'imp') return;
     const file = ev.target.files[0];
