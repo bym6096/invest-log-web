@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v16';
+  const APP_VERSION = 'v17';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -378,7 +378,7 @@
     const pct = (s.diff / s.last.balance) * 100;
     return `
     <section class="card hero">
-      <div class="label">현재 바이낸스 시드 · ${short(s.last.date)}${s.last.np ? ' · np' : ''}</div>
+      <div class="label">현재 바이낸스 시드 · ${short(s.last.date)}${s.last.np ? ' · No position' : ''}</div>
       <div class="big">${usd(s.last.balance)}</div>
       <label class="basepick">기준 시점<select id="base">${[...snaps()].reverse().filter((r) => r.date <= s.last.date).map((r) =>
         `<option value="${r.id}"${r.id === s.base.id ? ' selected' : ''}>${short(r.date)} · ${num(r.balance, 2).replace(/\.00$/, '')}${r.after ? ' (입출금 후)' : ''}</option>`).join('')}</select></label>
@@ -454,7 +454,7 @@
     return `<form class="form" data-form="snap"${r ? ` data-id="${r.id}"` : ''}><div class="grid2">
       <label>날짜${dateInput('date', r ? r.date : today(), { req: true })}</label>
       <label>바이낸스 시드($, 미실현 제외)<input type="number" step="any" name="balance" value="${r ? r.balance : ''}" required inputmode="decimal"></label></div>
-      <label class="chk"><input type="checkbox" name="np"${!r || r.np ? ' checked' : ''}> 포지션 없음(np)</label>
+      <label class="chk"><input type="checkbox" name="np"${!r || r.np ? ' checked' : ''}> No position (포지션 없음)</label>
       <label class="chk"><input type="checkbox" name="after"${r && r.after ? ' checked' : ''}> 이 날짜의 입출금이 이미 반영된 잔고</label>
       <label>메모<input name="note" value="${r ? val(r.note) : ''}"></label><button class="btn">저장</button>${cancelBtn(r)}</form>`;
   }
@@ -517,7 +517,7 @@
     <section class="card"><h2>총 시드 기록</h2>
       <button class="link" data-act="addsnap">${formOpen.snap ? '닫기' : '+ 시드 기록 추가'}</button>
       ${formOpen.snap ? snapForm() : ''}
-      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">np</span>' : ''}${r.after ? ' <span class="chip">입출금 후</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}</span>${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
+      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">No position</span>' : ''}${r.after ? ' <span class="chip">입출금 후</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}</span>${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
     </section>
     <section class="card"><h2>입출금 (USD)</h2>
       <button class="link" data-act="addflow">${formOpen.flow ? '닫기' : '+ 입출금 추가'}</button>
