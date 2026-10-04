@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v14';
+  const APP_VERSION = 'v15';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -40,6 +40,18 @@
   const addDays = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
   const daysUntil = (iso) => Math.round((Date.parse(iso) - Date.parse(today())) / 86400000);
   const nid = () => 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  // 날짜는 숫자 키패드로 입력 (20261203 또는 261203 → 2026-12-03). 폰마다 달력/키패드가 안 뜨는 type=date를 쓰지 않는다
+  function parseDateText(t) {
+    const d = String(t).replace(/\D/g, '');
+    let iso;
+    if (d.length === 8) iso = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`;
+    else if (d.length === 6) iso = `20${d.slice(0, 2)}-${d.slice(2, 4)}-${d.slice(4)}`;
+    else return null;
+    const dt = new Date(iso + 'T00:00:00Z');
+    return !isNaN(dt) && dt.toISOString().slice(0, 10) === iso ? iso : null;
+  }
+  const dateInput = (name, value, { req = false, sf, i } = {}) =>
+    `<input type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="예: 20261203" data-date${req ? ' data-req' : ''}${name ? ` name="${name}"` : ''}${sf ? ` data-sf="${sf}" data-i="${i}"` : ''} value="${value === undefined || value === null ? '' : String(value).replace(/"/g, '&quot;')}">`;
   const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0); // 안정 정렬
 
   // ---------- 계산 ----------
@@ -287,7 +299,7 @@
           <label><select data-sf="coin" data-i="${i}"><option value="">코인 선택</option>${db.coins.map((c) => `<option${c.sym === it.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label></div>
           <div class="grid2">
             <label>실현 손익($)<input type="number" step="any" data-sf="amount" data-i="${i}" value="${it.amount}" inputmode="decimal"></label>
-            <label>날짜<input type="date" data-sf="date" data-i="${i}" value="${val(it.date)}"></label>
+            <label>날짜${dateInput(null, it.date, { sf: 'date', i })}</label>
             <label>펀딩비($)<input type="number" step="any" data-sf="funding" data-i="${i}" value="${optNum(it.funding)}" inputmode="decimal"></label>
             <label>거래수수료($)<input type="number" step="any" data-sf="fee" data-i="${i}" value="${optNum(it.fee)}" inputmode="decimal"></label>
           </div>
@@ -319,7 +331,7 @@
     const label = n === null ? '만료일을 설정하세요' : n < 0 ? `${short(ex)} · 만료됨 (${-n}일 지남)` : n === 0 ? `${short(ex)} · 오늘 만료` : `${short(ex)} · D-${n}`;
     return `<section class="card alertcard"><div class="alertrow"><div><div class="label">🔔 TradingView 얼러트 만료</div><div class="v ${state}">${label}</div></div>
       <div class="alertbtns"><button class="link" data-act="editalert">${formOpen.alert ? '닫기' : '변경'}</button>${ex ? '<button class="link" data-act="ics">캘린더</button>' : ''}</div></div>
-      ${formOpen.alert ? `<form class="form" data-form="alert"><label>만료일<input type="date" name="date" value="${val(ex)}" required></label><button class="btn">저장</button></form>` : ''}
+      ${formOpen.alert ? `<form class="form" data-form="alert"><label>만료일${dateInput('date', ex, { req: true })}</label><button class="btn">저장</button></form>` : ''}
       ${n !== null && n <= 7 ? `<p class="hint warn">${n < 0 ? '이미 만료됐어요. TradingView에서 얼러트를 다시 켜고' : '곧 만료돼요. TradingView에서 얼러트 만료일을 갱신하고'} 여기 날짜도 바꿔주세요.</p>` : ''}</section>`;
   }
 
@@ -428,7 +440,7 @@
     return `<form class="form" data-form="event" data-coin="${esc(c.sym)}"${e ? ` data-id="${e.id}"` : ''}>
       <div class="grid2">
         <label>종류<select name="type">${opt('t', '거래 (손익 반영)')}${opt('r', '밸런스조정')}${opt('w', '출금')}${opt('d', '시드추가')}${opt('i', '초기시드')}</select></label>
-        <label>날짜<input type="date" name="date" value="${e ? val(e.date) : today()}"></label>
+        <label>날짜${dateInput('date', e ? e.date : today())}</label>
         <label>변경 후 시드($)<input type="number" step="any" name="seed" value="${e ? e.seed : ''}" required inputmode="decimal"></label>
         <label>출금액($, 출금일 때)<input type="number" step="any" name="amount" value="${e ? val(e.amount) : ''}" inputmode="decimal"></label>
         <label>펀딩비($, 지출은 −)<input type="number" step="any" name="funding" value="${e ? val(e.funding) : ''}" inputmode="decimal"></label>
@@ -440,7 +452,7 @@
 
   function snapForm(r) {
     return `<form class="form" data-form="snap"${r ? ` data-id="${r.id}"` : ''}><div class="grid2">
-      <label>날짜<input type="date" name="date" value="${r ? r.date : today()}" required></label>
+      <label>날짜${dateInput('date', r ? r.date : today(), { req: true })}</label>
       <label>바이낸스 시드($, 미실현 제외)<input type="number" step="any" name="balance" value="${r ? r.balance : ''}" required inputmode="decimal"></label></div>
       <label class="chk"><input type="checkbox" name="np"${!r || r.np ? ' checked' : ''}> 포지션 없음(np)</label>
       <label class="chk"><input type="checkbox" name="after"${r && r.after ? ' checked' : ''}> 이 날짜의 입출금이 이미 반영된 잔고</label>
@@ -451,7 +463,7 @@
     const t = f ? f.type : 'out';
     return `<form class="form" data-form="flow"${f ? ` data-id="${f.id}"` : ''}><div class="grid2">
       <label>구분<select name="type"><option value="out"${t === 'out' ? ' selected' : ''}>출금</option><option value="in"${t === 'in' ? ' selected' : ''}>입금</option></select></label>
-      <label>날짜<input type="date" name="date" value="${f ? f.date : today()}" required></label>
+      <label>날짜${dateInput('date', f ? f.date : today(), { req: true })}</label>
       <label>금액($)<input type="number" step="any" name="usd" value="${f ? f.usd : ''}" required inputmode="decimal"></label>
       <label>코인 시드에서 출금<select name="coin"><option value="">총 시드에서만</option>${db.coins.map((c) => `<option${f && f.coin === c.sym ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label></div>
       <label class="chk"><input type="checkbox" name="est"${f && f.est ? ' checked' : ''}> 추정 금액</label>
@@ -459,7 +471,7 @@
   }
 
   function logForm(r) {
-    return `<form class="form" data-form="log"${r ? ` data-id="${r.id}"` : ''}><label>날짜<input type="date" name="date" value="${r ? r.date : today()}" required></label>
+    return `<form class="form" data-form="log"${r ? ` data-id="${r.id}"` : ''}><label>날짜${dateInput('date', r ? r.date : today(), { req: true })}</label>
       <label>내용<textarea name="text" rows="3" required>${r ? val(r.text) : ''}</textarea></label><button class="btn">저장</button>${cancelBtn(r)}</form>`;
   }
 
@@ -611,6 +623,17 @@
     ev.preventDefault();
     const v = Object.fromEntries(new FormData(f));
     const kind = f.dataset.form;
+    for (const inp of f.querySelectorAll('[data-date]')) {
+      const raw = inp.value.trim();
+      if (!raw) {
+        if (inp.hasAttribute('data-req')) { alert('날짜를 입력하세요. 예: 20261203'); return; }
+        v[inp.name] = '';
+        continue;
+      }
+      const iso = parseDateText(raw);
+      if (!iso) { alert('날짜 형식을 확인하세요. 예: 20261203'); return; }
+      v[inp.name] = iso;
+    }
     if (kind === 'alert') { db.alertExpiry = v.date; formOpen.alert = false; commit(); return; }
     const id = f.dataset.id;
     editing = null;
@@ -663,6 +686,10 @@
       const it = shot.items[+ev.target.dataset.i];
       const t = ev.target;
       if (sf === 'on') it.on = t.checked;
+      else if (sf === 'date') {
+        const iso = t.value.trim() ? parseDateText(t.value) : '';
+        if (iso === null) alert('날짜 형식을 확인하세요. 예: 20261203'); else it.date = iso;
+      }
       else if (sf === 'amount') it.amount = parseFloat(t.value) || 0;
       else if (sf === 'funding' || sf === 'fee') it[sf] = t.value === '' ? null : parseFloat(t.value);
       else it[sf] = t.value;
@@ -686,7 +713,20 @@
     });
   });
 
-  document.addEventListener('input', (ev) => { if (ev.target.id === 'pastebox') pasteDraft = ev.target.value; });
+  document.addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (t.id === 'pastebox') pasteDraft = t.value;
+    if (t.dataset && 'date' in t.dataset) {
+      const d = t.value.replace(/\D/g, '').slice(0, 8);
+      t.value = d.length > 6 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : d.length > 4 ? `${d.slice(0, 4)}-${d.slice(4)}` : d;
+    }
+  });
+  document.addEventListener('focusin', (ev) => { if (ev.target.dataset && 'date' in ev.target.dataset) ev.target.select(); });
+  // 칸을 벗어나면 6자리 약식도 2026-12-03 형태로 정리
+  document.addEventListener('focusout', (ev) => {
+    const t = ev.target;
+    if (t.dataset && 'date' in t.dataset && t.value.trim()) { const iso = parseDateText(t.value); if (iso) t.value = iso; }
+  });
   try { localStorage.removeItem('invest.ai'); } catch (e) { /* 이전 버전의 API 키 잔여분 삭제 */ }
 
   // 브라우저는 서비스워커 업데이트를 매번 확인하지 않아서, 실행할 때마다 직접 확인한다
