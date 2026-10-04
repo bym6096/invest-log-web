@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v13';
+  const APP_VERSION = 'v14';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -36,7 +36,9 @@
   const signed = (n, d = 0) => (n > 0 ? '+' : n < 0 ? '−' : '') + num(Math.abs(n), d);
   const cls = (n) => (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
   const short = (d) => (d ? d.slice(2).replace(/-/g, '/') : '–');
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+  const addDays = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
+  const daysUntil = (iso) => Math.round((Date.parse(iso) - Date.parse(today())) / 86400000);
   const nid = () => 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0); // 안정 정렬
 
@@ -309,6 +311,36 @@
   }
 
   // ---------- 화면 ----------
+  // TradingView 얼러트 만료일 표시 (만료 갱신은 TradingView에서 직접 해야 해서 앱은 날짜만 기억하고 알려준다)
+  function alertCard() {
+    const ex = db.alertExpiry;
+    const n = ex ? daysUntil(ex) : null;
+    const state = n === null ? '' : n < 0 ? 'neg' : n <= 7 ? 'warn' : '';
+    const label = n === null ? '만료일을 설정하세요' : n < 0 ? `${short(ex)} · 만료됨 (${-n}일 지남)` : n === 0 ? `${short(ex)} · 오늘 만료` : `${short(ex)} · D-${n}`;
+    return `<section class="card alertcard"><div class="alertrow"><div><div class="label">🔔 TradingView 얼러트 만료</div><div class="v ${state}">${label}</div></div>
+      <div class="alertbtns"><button class="link" data-act="editalert">${formOpen.alert ? '닫기' : '변경'}</button>${ex ? '<button class="link" data-act="ics">캘린더</button>' : ''}</div></div>
+      ${formOpen.alert ? `<form class="form" data-form="alert"><label>만료일<input type="date" name="date" value="${val(ex)}" required></label><button class="btn">저장</button></form>` : ''}
+      ${n !== null && n <= 7 ? `<p class="hint warn">${n < 0 ? '이미 만료됐어요. TradingView에서 얼러트를 다시 켜고' : '곧 만료돼요. TradingView에서 얼러트 만료일을 갱신하고'} 여기 날짜도 바꿔주세요.</p>` : ''}</section>`;
+  }
+
+  // 만료 7일 전·1일 전 오전 9시 알림이 울리는 일정 파일(.ics) 내려받기
+  function downloadIcs() {
+    const ex = db.alertExpiry;
+    if (!ex) return;
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+    const ev = [7, 1].map((k) => ({ k, day: addDays(ex, -k) })).filter((e) => e.day >= today()).map(({ k, day }) => {
+      const d = day.replace(/-/g, '');
+      return ['BEGIN:VEVENT', `UID:invest-alert-${ex}-d${k}@invest-log`, `DTSTAMP:${stamp}`, `DTSTART:${d}T090000`, `DTEND:${d}T093000`,
+        `SUMMARY:TradingView 얼러트 만료 D-${k} (${ex})`, 'DESCRIPTION:TradingView 얼러트 만료일을 갱신하세요', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:TradingView 얼러트 갱신', 'TRIGGER:PT0S', 'END:VALARM', 'END:VEVENT'].join('\r\n');
+    });
+    if (!ev.length) { alert('이미 알림 시점이 지나서 만들 일정이 없어요.'); return; }
+    const text = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//invest-log//KO', ...ev, 'END:VCALENDAR', ''].join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/calendar;charset=utf-8' }));
+    a.download = 'tradingview-alert.ics';
+    a.click();
+  }
+
   // 코인별 포지션 사이즈 = 코인 시드(마지막 기록) × 레버리지
   function sizeCard() {
     if (!db.coins.length) return '';
@@ -345,6 +377,7 @@
       <p class="hint">${short(s.base.date)} 이후 입금 ${usd(s.cur.dep)} · 출금 ${usd(s.cur.wd)} 반영.
       전체 기간(${short(s.first.date)}~) 누적은 <span class="${cls(s.all.profit)}">${signed(s.all.profit)}$</span></p>
     </section>
+    ${alertCard()}
 
     <section class="card">
       <h2>코인별 시드 합 ↔ 실제 총 시드</h2>
@@ -545,6 +578,8 @@
         db.coins.push({ sym, lev, weight: 0, events: [{ id: nid(), seed, date: today(), type: 'i' }] });
         openCoin = sym; commit();
       }
+      if (d.act === 'editalert') toggle('alert');
+      if (d.act === 'ics') downloadIcs();
       if (d.act === 'shotcancel') { shot = null; pasteDraft = ''; render(); }
       if (d.act === 'shotsave') saveShot();
       if (d.act === 'hardrefresh') {
@@ -576,6 +611,7 @@
     ev.preventDefault();
     const v = Object.fromEntries(new FormData(f));
     const kind = f.dataset.form;
+    if (kind === 'alert') { db.alertExpiry = v.date; formOpen.alert = false; commit(); return; }
     const id = f.dataset.id;
     editing = null;
     if (kind === 'event') {
