@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v15';
+  const APP_VERSION = 'v16';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -542,8 +542,7 @@
       <section class="card"><h2>백업 · 복원</h2>
       <p class="hint">데이터는 이 기기 브라우저에만 저장됩니다. 주기적으로 내보내기 하세요.</p>
       <button class="btn" data-act="export">JSON 내보내기</button>
-      <label class="btn alt">JSON 가져오기<input type="file" accept="application/json" id="imp" hidden></label>
-      <button class="btn danger" data-act="reset">모든 데이터 지우기</button></section>`;
+      <label class="btn alt">JSON 가져오기<input type="file" accept="application/json" id="imp" hidden></label></section>`;
   }
 
   const VIEWS = { sum: viewSum, coins: viewCoins, rec: viewRec, log: viewLog, set: viewSet };
@@ -610,9 +609,6 @@
         a.href = URL.createObjectURL(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }));
         a.download = `invest-log-${today()}.json`;
         a.click();
-      }
-      if (d.act === 'reset' && confirm('이 기기의 모든 기록이 지워집니다. 내보내기로 백업하셨나요?')) {
-        db = JSON.parse(JSON.stringify(EMPTY)); commit();
       }
     }
   });
