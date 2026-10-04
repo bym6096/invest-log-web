@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v12';
+  const APP_VERSION = 'v13';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -309,6 +309,19 @@
   }
 
   // ---------- 화면 ----------
+  // 코인별 포지션 사이즈 = 코인 시드(마지막 기록) × 레버리지
+  function sizeCard() {
+    if (!db.coins.length) return '';
+    const rows = db.coins.map((c) => ({ sym: c.sym, lev: c.lev, seed: curSeed(c), size: curSeed(c) * c.lev }));
+    const tot = rows.reduce((a, r) => ({ seed: a.seed + r.seed, size: a.size + r.size }), { seed: 0, size: 0 });
+    return `<section class="card"><h2>코인별 포지션 사이즈 <small class="muted">(시드 × 레버리지)</small></h2>
+      <table class="tbl sizes"><thead><tr><th>코인</th><th>시드</th><th>레버리지</th><th>총 사이즈</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td><b>${esc(r.sym)}</b></td><td>${num(r.seed)}</td><td>x${r.lev}</td><td class="size">${usd(r.size)}</td></tr>`).join('')}
+      <tr class="sum"><td>합계</td><td>${num(tot.seed)}</td><td>${tot.seed ? 'x' + num(tot.size / tot.seed, 2) : ''}</td><td class="size">${usd(tot.size)}</td></tr>
+      </tbody></table>
+      <p class="hint">코인 탭 기록의 마지막 시드 기준이에요 (실제 총 시드와 오차가 있을 수 있어요).</p></section>`;
+  }
+
   function viewSum() {
     if (!db.snapshots.length) {
       return `<section class="card"><h2>아직 데이터가 없어요</h2>
@@ -369,7 +382,8 @@
     <section class="card">
       <h2>총 시드 추이</h2>
       ${lineChart([{ name: '바이낸스 USD', color: 'var(--c1)', pts: snaps().map((r) => [T(r.date), r.balance]) }])}
-    </section>`;
+    </section>
+    ${sizeCard()}`;
   }
 
   const cancelBtn = (e) => (e ? '<button type="button" class="btn alt" data-cancel>취소</button>' : '');
