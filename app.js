@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v17';
+  const APP_VERSION = 'v18';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -511,13 +511,30 @@
   }
 
   function viewRec() {
-    const sn = [...snaps()].reverse();
+    const order = snaps();
+    const sn = [...order].reverse();
+    // 직전 기록 대비 변화. 사이에 입출금이 있으면 그 영향을 뺀 변화도 같이 보여준다
+    const prevOf = (r) => { const i = order.indexOf(r); return i > 0 ? order[i - 1] : null; };
+    const snapDelta = (r) => {
+      const pv = prevOf(r);
+      if (!pv) return '<span class="delta muted">시작</span>';
+      const d = r.balance - pv.balance;
+      return `<span class="delta ${cls(d)}">${signed(d)}<br><small class="muted">${signed(pv.balance ? (d / pv.balance) * 100 : 0, 1)}%</small></span>`;
+    };
+    const snapSub = (r) => {
+      const pv = prevOf(r);
+      if (!pv) return '';
+      const f = profitBetween(pv, r);
+      if (!f.dep && !f.wd) return '';
+      const parts = [f.dep ? `입금 ${usd(f.dep)}` : '', f.wd ? `출금 ${usd(f.wd)}` : ''].filter(Boolean).join(' · ');
+      return `<br><small class="muted">입출금 제외 <span class="${cls(f.profit)}">${signed(f.profit)}</span><br>${parts}</small>`;
+    };
     const fl = [...db.flows].sort(byDate).reverse();
     return `
     <section class="card"><h2>총 시드 기록</h2>
       <button class="link" data-act="addsnap">${formOpen.snap ? '닫기' : '+ 시드 기록 추가'}</button>
       ${formOpen.snap ? snapForm() : ''}
-      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">No position</span>' : ''}${r.after ? ' <span class="chip">입출금 후</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}</span>${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
+      <ul class="list">${sn.map((r) => isEd('snap', r.id) ? `<li class="editli">${snapForm(r)}</li>` : `<li><span class="d">${short(r.date)}</span><span class="grow">${num(r.balance, 2).replace(/\.00$/, '')}${r.np ? ' <span class="chip">No position</span>' : ''}${r.after ? ' <span class="chip">입출금 후</span>' : ''}${r.note ? ` <small class="muted">${esc(r.note)}</small>` : ''}${snapSub(r)}</span>${snapDelta(r)}${editBtn('snap', r.id)}<button class="x" data-del="snap" data-id="${r.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
     </section>
     <section class="card"><h2>입출금 (USD)</h2>
       <button class="link" data-act="addflow">${formOpen.flow ? '닫기' : '+ 입출금 추가'}</button>
