@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v18';
+  const APP_VERSION = 'v19';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -170,14 +170,19 @@
 
   function parseBinanceText(raw) {
     const text = String(raw).replace(/[−–—]/g, '-').replace(/ /g, ' ');
-    // 1) 손익 상세 팝업: "Realized PNL" 뒤에 "(USDT)" 라벨이 오지 않는 첫 지점부터. 값 순서는 실현/청산손익/펀딩비/거래수수료/보험청산수수료
+    // 1) 손익 상세 팝업: "Realized PNL +7,602.85 USDT"(값이 붙은 형태) 또는 "Realized PNL ... Closing PNL"(라벨이 먼저 나오는 형태)로 찾는다.
+    //    값은 실현/청산손익/펀딩비/거래수수료/보험청산수수료 순. 팝업 구간만 도려내서 앞뒤 어디에 카드가 있어도 읽는다
     let body = text, bd = null;
-    const bi = text.search(/Realized\s+PNL(?!\s*\()/i);
-    if (bi >= 0) {
-      const vals = [...text.slice(bi).matchAll(/([+-]?\d[\d,]*(?:\.\d+)?)\s*USDT/gi)].map((m) => toNum(m[1]));
-      if (vals.length >= 4) {
-        bd = { realized: vals[0], closing: vals[1], funding: vals[2], fee: vals[3], ins: vals[4] || 0, used: false };
-        body = text.slice(0, bi);
+    const m0 = text.match(/Realized\s+PNL\s*[+-]?\d[\d,]*(?:\.\d+)?\s*USDT|Realized\s+PNL[\s\S]{0,60}?Closing\s+PNL/i);
+    if (m0) {
+      const re = /([+-]?\d[\d,]*(?:\.\d+)?)\s*USDT/gi;
+      re.lastIndex = m0.index;
+      const found = [];
+      for (let m = re.exec(text); m && found.length < 5; m = re.exec(text)) found.push({ v: toNum(m[1]), end: m.index + m[0].length });
+      if (found.length >= 4) {
+        const v = found.map((x) => x.v);
+        bd = { realized: v[0], closing: v[1], funding: v[2], fee: v[3], ins: v[4] || 0 };
+        body = text.slice(0, m0.index) + ' ' + text.slice(found[found.length - 1].end);
       }
     }
     // 2) 포지션 카드: 심볼(SUIUSDT) 단위로 자르고, 카드 안에서 값을 찾는다
@@ -196,12 +201,17 @@
       else it.note = (it.note ? it.note + ' / ' : '') + '종료 날짜를 못 찾았어요';
       return it;
     });
-    // 3) 상세 팝업의 펀딩비·수수료를 실현 손익이 같은 카드에 붙인다
+    // 3) 상세 팝업의 펀딩비·수수료를 실현 손익이 같은 카드에 붙인다. 같은 카드가 없고 상세가 안 붙은 카드가 하나뿐이면(글자 오인식 가능) 그 카드에 붙이고 확인을 요청
     if (bd) {
-      const hit = items.find((it) => it.amount !== null && Math.abs(it.amount - bd.realized) < 0.011);
+      const exact = items.find((it) => it.amount !== null && Math.abs(it.amount - bd.realized) < 0.011);
+      const open = items.filter((it) => it.amount !== null);
+      const hit = exact || (open.length === 1 ? open[0] : null);
       const target = hit || { coin: '', amount: bd.realized, date: '', funding: null, fee: null, note: '손익 상세만 있어요. 코인과 날짜를 직접 고르세요', source: 'Realized PNL 상세' };
       target.funding = bd.funding; target.fee = bd.fee; target.matched = !!hit;
-      if (Math.abs(bd.closing + bd.funding + bd.fee + bd.ins - bd.realized) > 0.05) target.note = (target.note ? target.note + ' / ' : '') + '상세 항목 합계가 실현 손익과 달라요';
+      const notes = [];
+      if (hit && !exact) notes.push(`카드 손익(${hit.amount})과 상세 손익(${bd.realized})이 달라요. 숫자를 확인하세요`);
+      if (Math.abs(bd.closing + bd.funding + bd.fee + bd.ins - bd.realized) > 0.05) notes.push('상세 항목 합계가 실현 손익과 달라요');
+      if (notes.length) target.note = [target.note, ...notes].filter(Boolean).join(' / ');
       if (!hit) items.push(target);
     }
     return items;
@@ -308,6 +318,7 @@
           ${!it.coin ? '<div class="hint warn">⚠ 코인을 선택해야 저장할 수 있어요</div>' : ''}
           ${!it.date ? '<div class="hint warn">날짜가 비어 있어요. 비워두면 오늘 날짜로 저장돼요.</div>' : ''}
           ${it.note ? `<div class="hint warn">${esc(it.note)}</div>` : ''}
+          ${it.funding === null && it.fee === null ? '<div class="hint">펀딩비·수수료는 손익 상세 팝업(Realized PNL을 눌러 열림)을 같이 찍어 붙여넣으면 자동으로 채워져요.</div>' : ''}
           <div class="hint">읽은 내용: ${esc(it.source)}</div></div>`;
       }).join('');
       const okCount = shot.items.filter((it) => it.on && it.coin).length;
