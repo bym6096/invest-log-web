@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v20';
+  const APP_VERSION = 'v21';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -77,7 +77,7 @@
       }
       if (e.type === 'w') wd += e.amount || 0;
       fund += e.funding || 0; fee += e.fee || 0;
-      const row = { ...e, delta, pnlEvent: e.type === 't' || e.type === 'w' };
+      const row = { ...e, delta, prev, pnlEvent: e.type === 't' || e.type === 'w' };
       prev = e.seed;
       return row;
     });
@@ -529,10 +529,10 @@
             <li><span class="d">${short(e.date)}</span>
             <span class="badge b-${e.type}">${TYPE_LABEL[e.type]}</span>
             <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}${e.funding || e.fee ? `<br><small class="muted">${e.funding ? `펀딩 ${signed(e.funding, 2)}` : ''}${e.funding && e.fee ? ' · ' : ''}${e.fee ? `수수료 ${signed(e.fee, 2)}` : ''}</small>` : ''}</span>
-            <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : signed(e.delta)}</span>
+            <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : `${signed(e.delta)}${e.prev ? `<br><small>${signed((e.delta / e.prev) * 100, 1)}%</small>` : ''}`}</span>
             ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button></li>`).join('')}
           </ul>
-          <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화입니다. 거래·출금만 손익으로 합산하고, 밸런스조정·시드추가는 제외합니다.</p>` : ''}
+          <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화(금액과 %)입니다. 출금은 출금액을 되돌려 계산해요. 거래·출금만 손익으로 합산하고, 밸런스조정·시드추가는 제외합니다.</p>` : ''}
       </section>`;
     }).join('') + `<button class="link" data-act="addcoin">+ 코인 추가</button>`;
   }
