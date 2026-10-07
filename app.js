@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v19';
+  const APP_VERSION = 'v20';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -164,18 +164,34 @@
 
   // ---------- 텍스트 붙여넣기 입력 (바이낸스 선물 Position History) ----------
   // 갤러리의 글자 추출 등으로 복사한 텍스트를 읽는다. 글자 순서가 달라도 되도록 라벨 위치가 아니라 값의 종류로 판별한다.
-  const NUM = /^[+-]?\d[\d,]*(?:\.\d+)?$/;
-  const DT = /\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?/g;
-  const toNum = (w) => parseFloat(String(w).replace(/,/g, ''));
+  // 숫자 한 덩어리 (예: 7,602.85 / -3,727.35 / 글자 인식이 쉼표를 마침표로 읽은 -3.727.35)
+  const NUMTOK = '[+-]?\\d(?:[\\d.,]*\\d)?';
+  const NUM = new RegExp('^' + NUMTOK + '$');
+  const DT = /\d{4}-\d{2}-\d{2}(?:[\s-]\d{2}[:.-]\d{2}[:.-]\d{2})?/g; // 2026-10-01 23:47:18 (시간 구분이 -로 읽혀도 인식)
+  function toNum(w) {
+    let t = String(w).replace(/\s/g, '');
+    const sign = t.startsWith('-') ? -1 : 1;
+    t = t.replace(/^[+-]/, '');
+    const seps = t.match(/[.,]/g) || [];
+    const last = Math.max(t.lastIndexOf('.'), t.lastIndexOf(','));
+    const tail = t.slice(last + 1);
+    if (seps.length >= 2) {
+      // 마지막 구분자 뒤가 3자리면 전부 천 단위(1,234,567), 아니면 마지막이 소수점(3.727.35 -> 3727.35)
+      t = tail.length === 3 ? t.replace(/[.,]/g, '') : t.slice(0, last).replace(/[.,]/g, '') + '.' + tail;
+    } else if (seps.length === 1 && t[last] === ',') {
+      t = tail.length === 3 ? t.replace(',', '') : t.replace(',', '.'); // 28,490 -> 28490
+    }
+    return sign * parseFloat(t);
+  }
 
   function parseBinanceText(raw) {
     const text = String(raw).replace(/[−–—]/g, '-').replace(/ /g, ' ');
     // 1) 손익 상세 팝업: "Realized PNL +7,602.85 USDT"(값이 붙은 형태) 또는 "Realized PNL ... Closing PNL"(라벨이 먼저 나오는 형태)로 찾는다.
     //    값은 실현/청산손익/펀딩비/거래수수료/보험청산수수료 순. 팝업 구간만 도려내서 앞뒤 어디에 카드가 있어도 읽는다
     let body = text, bd = null;
-    const m0 = text.match(/Realized\s+PNL\s*[+-]?\d[\d,]*(?:\.\d+)?\s*USDT|Realized\s+PNL[\s\S]{0,60}?Closing\s+PNL/i);
+    const m0 = text.match(new RegExp('Realized\\s+PNL\\s*' + NUMTOK + '\\s*USDT|Realized\\s+PNL[\\s\\S]{0,60}?Closing\\s+PNL', 'i'));
     if (m0) {
-      const re = /([+-]?\d[\d,]*(?:\.\d+)?)\s*USDT/gi;
+      const re = new RegExp('(' + NUMTOK + ')\\s*USDT', 'gi');
       re.lastIndex = m0.index;
       const found = [];
       for (let m = re.exec(text); m && found.length < 5; m = re.exec(text)) found.push({ v: toNum(m[1]), end: m.index + m[0].length });
