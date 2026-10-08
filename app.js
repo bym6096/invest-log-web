@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v21';
+  const APP_VERSION = 'v22';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -207,11 +207,18 @@
       const chunk = body.slice(m.index + m[0].length, i + 1 < syms.length ? syms[i + 1].index : body.length);
       const dts = chunk.match(DT) || [];
       const words = chunk.replace(DT, ' ').split(/\s+/).filter(Boolean);
-      const first = words.find((w) => NUM.test(w) || w === '--'); // 카드에서 가장 먼저 나오는 숫자가 실현 손익
+      const from = Math.max(0, words.findIndex((w) => /^PNL/i.test(w)));
+      const first = words.slice(from).find((w) => NUM.test(w) || w === '--'); // PNL 라벨 뒤에서 가장 먼저 나오는 숫자가 실현 손익
       const coin = m[1].replace(/^1000+/, '');
       const it = { coin, amount: null, date: '', funding: null, fee: null, note: '', source: `${m[0]} ${first || ''}`.trim() };
       if (!first || first === '--') { it.note = '실현 손익을 읽지 못했어요 (2026년 이전 포지션은 "--"로 표시돼요)'; return it; }
-      it.amount = toNum(first);
+      // 글자 인식이 소수점을 공백으로 읽은 경우 (-2,844 64 -25.86% → -2,844.64)
+      const fi = from + words.slice(from).indexOf(first);
+      const spaced = /^\d{2}$/.test(words[fi + 1] || '') && /%$/.test(words[fi + 2] || '');
+      it.amount = toNum(spaced ? `${first}.${words[fi + 1]}` : first);
+      if (spaced) it.source += `.${words[fi + 1]}`;
+      const roiWord = words.find((w) => /%$/.test(w));
+      it.roiNeg = roiWord ? /^-/.test(roiWord) : null;
       if (!words.some((w) => /%$/.test(w))) it.note = 'ROI를 찾지 못했어요. 손익 값을 꼭 확인하세요';
       if (dts.length >= 2) it.date = dts.slice().sort().pop().slice(0, 10); // 종료 시각은 시작 시각보다 늦다
       else it.note = (it.note ? it.note + ' / ' : '') + '종료 날짜를 못 찾았어요';
@@ -219,7 +226,12 @@
     });
     // 3) 상세 팝업의 펀딩비·수수료를 실현 손익이 같은 카드에 붙인다. 같은 카드가 없고 상세가 안 붙은 카드가 하나뿐이면(글자 오인식 가능) 그 카드에 붙이고 확인을 요청
     if (bd) {
-      const exact = items.find((it) => it.amount !== null && Math.abs(it.amount - bd.realized) < 0.011);
+      // 부호는 글자 인식에서 가장 자주 틀리므로 절댓값으로 찾고, 부호는 팝업(정확히 읽히는 쪽) 기준으로 맞춘다
+      const exact = items.find((it) => it.amount !== null && Math.abs(Math.abs(it.amount) - Math.abs(bd.realized)) < 0.011);
+      if (exact && Math.sign(exact.amount) !== Math.sign(bd.realized)) {
+        exact.amount = bd.realized;
+        exact.note = [exact.note, '카드 손익의 부호를 손익 상세 팝업 기준으로 맞췄어요'].filter(Boolean).join(' / ');
+      }
       const open = items.filter((it) => it.amount !== null);
       const hit = exact || (open.length === 1 ? open[0] : null);
       const target = hit || { coin: '', amount: bd.realized, date: '', funding: null, fee: null, note: '손익 상세만 있어요. 코인과 날짜를 직접 고르세요', source: 'Realized PNL 상세' };
@@ -230,7 +242,130 @@
       if (notes.length) target.note = [target.note, ...notes].filter(Boolean).join(' / ');
       if (!hit) items.push(target);
     }
+    // 손익과 ROI의 부호가 다르면 글자 인식 오류일 가능성이 크다
+    items.forEach((it) => {
+      if (it.amount !== null && it.amount !== 0 && it.roiNeg !== null && it.roiNeg !== it.amount < 0) {
+        it.note = [it.note, `손익(${it.amount < 0 ? '−' : '+'})과 ROI(${it.roiNeg ? '−' : '+'})의 부호가 달라요. 손익 부호를 꼭 확인하세요`].filter(Boolean).join(' / ');
+      }
+    });
     return items;
+  }
+
+
+  // ---------- 스크린샷 글자 인식 (Tesseract.js, 폰 안에서 실행) ----------
+  // 밝은 글자(손익 상세 팝업)는 원본 그대로, 어둡게 가려진 목록 카드는 대비를 키워 구간별로 읽은 뒤 합친다.
+  let ocrWorker = null;
+  let ocrNote = () => {};
+  const loadScript = (src) => new Promise((res, rej) => {
+    const el = document.createElement('script');
+    el.src = src; el.onload = res;
+    el.onerror = () => rej(new Error('글자 인식 엔진을 불러오지 못했어요. 인터넷 연결을 확인하세요.'));
+    document.head.appendChild(el);
+  });
+  async function getOcr() {
+    if (ocrWorker) return ocrWorker;
+    if (!window.Tesseract) await loadScript('vendor/tesseract.min.js?v=' + APP_VERSION);
+    const base = new URL('vendor/', location.href).href;
+    ocrWorker = await Tesseract.createWorker('eng', 1, {
+      workerPath: base + 'worker.min.js', corePath: base, langPath: base, gzip: false, workerBlobURL: false,
+      logger: (m) => { if (m.status === 'loading language traineddata') ocrNote(`엔진 내려받는 중… ${Math.round((m.progress || 0) * 100)}% (처음 한 번만)`); },
+    });
+    return ocrWorker;
+  }
+  const linesOf = (data) => data.lines || (data.blocks || []).flatMap((b) => (b.paragraphs || []).flatMap((p) => p.lines || []));
+
+  async function loadBitmap(file) {
+    try { return await createImageBitmap(file); } catch (e) {
+      return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('이미지를 열 수 없어요.')); im.src = URL.createObjectURL(file); });
+    }
+  }
+  function sizedCanvas(src, maxSide) {
+    const k = Math.min(1, maxSide / Math.max(src.width, src.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(src.width * k); c.height = Math.round(src.height * k);
+    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  }
+  // 어두운 배경의 흐린 글자를 흰 배경의 검은 글자로: 회색조 → 대비 확장 → 반전 (밝은 배경 화면은 회색조만)
+  function boostCanvas(src, y0, y1) {
+    const h = Math.max(1, y1 - y0);
+    const c = document.createElement('canvas');
+    c.width = src.width; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(src, 0, y0, src.width, h, 0, 0, src.width, h);
+    const img = ctx.getImageData(0, 0, c.width, h);
+    const d = img.data;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < d.length; i += 4) { const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0; d[i] = d[i + 1] = d[i + 2] = g; hist[g]++; }
+    let bg = 0; for (let g = 1; g < 256; g++) if (hist[g] > hist[bg]) bg = g; // 가장 많은 밝기 = 배경
+    if (bg < 110) {
+      const total = d.length / 4; let acc = 0, hi = 255;
+      for (let g = 255; g >= 0; g--) { acc += hist[g]; if (acc > total * 0.003) { hi = g; break; } } // 가장 밝은 글자 수준
+      const lo = bg + 3, span = Math.max(40, hi - lo);
+      for (let i = 0; i < d.length; i += 4) {
+        const n = 255 - Math.max(0, Math.min(255, ((d[i] - lo) / span) * 255));
+        d[i] = d[i + 1] = d[i + 2] = n;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+  // 한 번에 읽는 높이를 제한하되, 글자 줄 사이 빈틈에서 자른다
+  function stripCuts(canvas, target = 700) {
+    const { width: w, height: h } = canvas;
+    const d = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    const ink = new Uint32Array(h);
+    for (let y = 0; y < h; y++) { let n = 0; for (let x = 0; x < w; x += 2) if (d[(y * w + x) * 4] < 140) n++; ink[y] = n; }
+    const cuts = [0];
+    let pos = 0;
+    while (h - pos > target * 1.35) {
+      const t = pos + target;
+      let best = t, bestV = Infinity;
+      for (let y = t - 160; y <= t + 160 && y < h - 10; y++) {
+        let v = 0; for (let k = 0; k < 10; k++) v += ink[y + k];
+        if (v < bestV) { bestV = v; best = y + 5; }
+      }
+      cuts.push(best); pos = best;
+    }
+    cuts.push(h);
+    return cuts;
+  }
+
+  async function ocrImage(file, say) {
+    const worker = await getOcr();
+    const full = sizedCanvas(await loadBitmap(file), 2600); // 줄이면 부호(−)가 사라질 수 있어 가능한 한 원본 크기로
+    say('손익 상세 읽는 중…');
+    const A = linesOf((await worker.recognize(full)).data);
+    // 팝업(Realized PNL 제목)의 위치를 찾아 그 위쪽만 카드로 읽는다
+    let title = A.find((l) => /^\W*Realized\s+PNL\W*$/i.test(l.text.trim()));
+    if (!title) { const cl = A.find((l) => /Closing\s*PNL/i.test(l.text)); if (cl) title = { bbox: { y0: cl.bbox.y0 - (cl.bbox.y1 - cl.bbox.y0) * 6 } }; }
+    const cutY = title ? Math.max(0, Math.round(title.bbox.y0 - full.height * 0.04)) : full.height;
+    const popupText = title ? A.filter((l) => l.bbox.y0 >= cutY).map((l) => l.text.trim()).join('\n') : '';
+    const boosted = boostCanvas(full, 0, cutY);
+    const cuts = stripCuts(boosted);
+    const parts = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      say(`카드 읽는 중… (${i + 1}/${cuts.length - 1})`);
+      const strip = boostCanvas(boosted, cuts[i], cuts[i + 1]);
+      parts.push((await worker.recognize(strip)).data.text.trim());
+    }
+    return parts.join('\n') + '\n' + popupText;
+  }
+
+  async function runOcr(files) {
+    const set = (msg) => { if (shot && shot.busy) { shot.msg = msg; render(); } };
+    shot = { busy: true, msg: '엔진 준비 중…', items: null, error: '' };
+    ocrNote = set;
+    render();
+    try {
+      const texts = [];
+      for (let i = 0; i < files.length; i++) texts.push(await ocrImage(files[i], (m) => set(files.length > 1 ? `(${i + 1}/${files.length}) ${m}` : m)));
+      pasteDraft = texts.join('\n');
+      runPaste(pasteDraft);
+    } catch (e) {
+      shot = { busy: false, error: '글자 인식에 실패했어요: ' + e.message, items: null };
+      render();
+    }
   }
 
   let shot = null; // { error, items }
@@ -240,7 +375,8 @@
   const round2 = (x) => Math.round(x * 100) / 100;
 
   function runPaste(text) {
-    const items = parseBinanceText(text).filter((x) => x.amount !== null || x.note);
+    let items = parseBinanceText(text).filter((x) => x.amount !== null || x.note);
+    if (items.some((x) => x.matched)) items = items.filter((x) => x.amount !== null); // 화면 끝에 잘려 읽지 못한 카드는 숨김
     if (!items.length) {
       shot = { error: '읽을 수 있는 기록을 찾지 못했어요. SUIUSDT 같은 코인 이름과 Realized PNL이 들어 있는 텍스트인지 확인하세요.', items: null };
       return render();
@@ -249,6 +385,7 @@
     const focus = items.some((x) => x.matched);
     shot = {
       error: '',
+      raw: text,
       items: items.map((x) => {
         const coin = findCoin(x.coin.toUpperCase()) ? x.coin.toUpperCase() : '';
         const bad = x.amount === null;
@@ -315,7 +452,8 @@
   const optNum = (x) => (x === null || x === undefined ? '' : x);
 
   function shotCard() {
-    const head = '<h2>📋 텍스트로 입력 (바이낸스)</h2>';
+    const head = '<h2>📋 바이낸스 기록 입력</h2>';
+    if (shot && shot.busy) return `<section class="card">${head}<p class="hint">⏳ ${esc(shot.msg || '읽는 중…')}</p><p class="hint">잠시만 기다려 주세요. 화면을 닫지 마세요.</p></section>`;
     if (shot && shot.items) {
       const plans = planShot(shot.items);
       const rows = shot.items.map((it, i) => {
@@ -340,13 +478,16 @@
       const okCount = shot.items.filter((it) => it.on && it.coin).length;
       return `<section class="card">${head}<p class="hint">읽은 결과예요. <b>숫자를 꼭 확인</b>하고 저장하세요.</p>${rows}
         <button class="btn" data-act="shotsave"${okCount ? '' : ' disabled'}>${okCount}건 저장</button>
-        <button class="btn alt" data-act="shotcancel">닫기</button></section>`;
+        <button class="btn alt" data-act="shotcancel">닫기</button>
+        ${shot.raw ? `<details><summary>읽은 글자 원문 보기</summary><pre class="rawtext">${esc(shot.raw)}</pre></details>` : ''}</section>`;
     }
     return `<section class="card">${head}
       ${shot && shot.error ? `<p class="hint warn">⚠ ${esc(shot.error)}</p>` : ''}
-      <p class="hint">① 바이낸스 Position History 스크린샷 (손익 상세 팝업을 열어 찍으면 펀딩비·수수료까지) → ② 갤러리에서 열어 글자 추출(T 아이콘)로 복사 → ③ 아래에 붙여넣기</p>
+      <p class="hint">Position History 스크린샷을 고르면 앱이 글자를 읽어요. <b>Realized PNL을 눌러 연 팝업</b>까지 같이 찍으면 펀딩비·수수료도 채워져요. (처음 한 번 약 10MB를 내려받아요)</p>
+      <label class="btn">📷 스크린샷 선택<input type="file" accept="image/*" multiple hidden id="ocrfile"></label>
+      <details><summary>복사한 글자를 직접 붙여넣기</summary>
       <textarea id="pastebox" rows="5" placeholder="여기에 붙여넣기">${esc(pasteDraft)}</textarea>
-      <button class="btn" data-act="parse">읽기</button></section>`;
+      <button class="btn alt" data-act="parse">읽기</button></details></section>`;
   }
 
   // ---------- 화면 ----------
@@ -721,6 +862,11 @@
   });
 
   document.addEventListener('change', (ev) => {
+    if (ev.target.id === 'ocrfile') {
+      const files = [...ev.target.files].slice(0, 5);
+      if (files.length) runOcr(files);
+      return;
+    }
     const sf = ev.target.dataset.sf;
     if (sf && shot && shot.items) {
       const it = shot.items[+ev.target.dataset.i];

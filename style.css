@@ -107,3 +107,5 @@ nav button.on { color: var(--accent); font-weight: 700; box-shadow: inset 0 2px 
 .alertrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .alertbtns { display: flex; gap: 2px; }
 .alertbtns .link { padding: 6px 8px; }
+details summary { cursor: pointer; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.rawtext { white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--muted); background: var(--bg); padding: 8px; border-radius: 8px; max-height: 260px; overflow: auto; margin: 4px 0 0; }
