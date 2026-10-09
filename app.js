@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v22';
+  const APP_VERSION = 'v23';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -23,6 +23,8 @@
   // 스냅샷의 after: 그날 입출금이 이미 반영된 잔고인지 (옛 데이터는 메모 끝이 '후'면 반영된 것으로 본다)
   function normalize(d) {
     d.snapshots.forEach((r) => { if (r.after === undefined) r.after = /후$/.test(r.note || ''); });
+    // 코인의 첫 기록만 시작 시드. 그 뒤의 '초기' 기록은 거래 결과(손익에 포함)로 본다
+    d.coins.forEach((c) => c.events.forEach((e, i) => { if (i > 0 && e.type === 'i') e.type = 't'; }));
     return d;
   }
   function save() {
@@ -657,7 +659,7 @@
           <div class="right"><b>${usd(cur)}</b><div class="muted">${num((cur / total) * 100, 1)}%</div></div>
         </div>
         <div class="row3 mini">
-          <div><div class="label">거래 손익 합</div><div class="${cls(st.pnl)}">${signed(st.pnl)}</div></div>
+          <div><div class="label">거래 손익 합 <small>(첫 시드 ${num(c.events[0] ? c.events[0].seed : 0)} 기준)</small></div><div class="${cls(st.pnl)}">${signed(st.pnl)}${c.events[0] && c.events[0].seed ? ` <small>${signed((st.pnl / c.events[0].seed) * 100, 1)}%</small>` : ''}</div></div>
           <div><div class="label">출금 표기</div><div>${usd(st.wd)}</div></div>
           <div><div class="label">기록 수</div><div>${c.events.length}</div></div>
         </div>
@@ -673,7 +675,7 @@
             <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : `${signed(e.delta)}${e.prev ? `<br><small>${signed((e.delta / e.prev) * 100, 1)}%</small>` : ''}`}</span>
             ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button></li>`).join('')}
           </ul>
-          <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화(금액과 %)입니다. 출금은 출금액을 되돌려 계산해요. 거래·출금만 손익으로 합산하고, 밸런스조정·시드추가는 제외합니다.</p>` : ''}
+          <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화(금액과 %)입니다. 출금은 출금액을 되돌려 계산해요. 첫 기록은 시작 시드이고, 그 이후 거래·출금 기록의 변화를 손익으로 합산해요 (밸런스조정·시드추가는 제외).</p>` : ''}
       </section>`;
     }).join('') + `<button class="link" data-act="addcoin">+ 코인 추가</button>`;
   }
