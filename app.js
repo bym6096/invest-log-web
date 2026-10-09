@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v24';
+  const APP_VERSION = 'v25';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -660,7 +660,7 @@
           <div class="right"><b>${usd(cur)}</b><div class="muted">${num((cur / total) * 100, 1)}%</div></div>
         </div>
         <div class="row3 mini">
-          <div><div class="label">최종 손익 합 <small>(첫 시드 ${num(first)} 대비)</small></div><div class="${cls(cur - first)}">${signed(cur - first)}${first ? ` <small>${signed(((cur - first) / first) * 100, 1)}%</small>` : ''}</div></div>
+          <div><div class="label">최종 손익 합</div><div class="${cls(cur - first)}">${signed(cur - first)}${first ? ` <small>${signed(((cur - first) / first) * 100, 1)}%</small>` : ''}</div></div>
           <div><div class="label">출금 표기</div><div>${usd(st.wd)}</div></div>
           <div><div class="label">기록 수</div><div>${c.events.length}</div></div>
         </div>
