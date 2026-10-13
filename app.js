@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v27';
+  const APP_VERSION = 'v28';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -676,6 +676,29 @@
     db.snapshots.push({ id: nid(), date: f.date, balance: round2(base.balance + (f.type === 'in' ? 1 : -1) * f.usd), np: !!base.np, after: true, note: f.type === 'in' ? '입금 후' : '출금 후', flow: f.id });
   }
 
+  // 입출금으로 생긴 코인 기록이 시드를 바꾼 양 (입금 +, 출금 −). 옛 기록은 형태로 추정한다
+  const shareOf = (events, i) => {
+    const e = events[i];
+    if (typeof e.share === 'number') return e.share;
+    return e.type === 'w' ? -(e.amount || 0) : i > 0 ? e.seed - events[i - 1].seed : 0;
+  };
+  // 입출금 분배를 되돌렸을 때 코인별로 시드에 되돌려 줄 양
+  function rollbackPlan(flowId) {
+    return db.coins.flatMap((c) => c.events.map((e, i) => ({ c, e, i })).filter((x) => x.e.flow === flowId).map(({ c, i }) => ({ coin: c.sym, back: round2(-shareOf(c.events, i)) })));
+  }
+  // 분배 기록을 지우고, 그 뒤 기록의 시드를 같은 양만큼 되돌린다 (거래 손익은 그대로, 다음 밸런스조정 전까지)
+  function rollbackFlow(flowId) {
+    db.snapshots = db.snapshots.filter((x) => x.flow !== flowId);
+    db.coins.forEach((c) => {
+      for (let i = c.events.length - 1; i >= 0; i--) {
+        if (c.events[i].flow !== flowId) continue;
+        const sh = shareOf(c.events, i);
+        c.events.splice(i, 1);
+        for (let k = i; k < c.events.length && c.events[k].type !== 'r'; k++) c.events[k].seed = round2(c.events[k].seed - sh);
+      }
+    });
+  }
+
   function applyCard() {
     if (!applying) return '';
     const f = db.flows.find((x) => x.id === applying.flowId);
@@ -728,8 +751,8 @@
     if (doSnap) db.snapshots.push({ id: nid(), date: f.date, balance: bal, np: !!A.np, after: true, note: f.type === 'in' ? '입금 후' : '출금 후', flow: f.id });
     parts.forEach((p) => {
       const ev = f.type === 'in'
-        ? { id: nid(), seed: p.after, date: f.date, type: 'd', note: '입금 분배', flow: f.id }
-        : { id: nid(), seed: p.after, date: f.date, type: 'w', amount: p.amount, note: '출금 분배', flow: f.id };
+        ? { id: nid(), seed: p.after, date: f.date, type: 'd', note: '입금 분배', flow: f.id, share: p.amount }
+        : { id: nid(), seed: p.after, date: f.date, type: 'w', amount: p.amount, note: '출금 분배', flow: f.id, share: -p.amount };
       insertEvent(p.coin, ev);
     });
     if (doDist) { f.dist = A.dist; if (A.dist === 'coin') f.coin = A.coin; }
@@ -878,12 +901,15 @@
       if (d.del === 'ev') { const c = findCoin(d.coin); c.events = c.events.filter((e) => e.id !== d.id); }
       if (d.del === 'snap') db.snapshots = db.snapshots.filter((r) => r.id !== d.id);
       if (d.del === 'flow') {
-        const linked = db.snapshots.some((x) => x.flow === d.id) || db.coins.some((c) => c.events.some((e) => e.flow === d.id));
+        const plan = rollbackPlan(d.id);
+        const linked = plan.length > 0 || db.snapshots.some((x) => x.flow === d.id);
         db.flows = db.flows.filter((r) => r.id !== d.id);
-        if (linked && confirm('이 입출금으로 자동 반영된 총 시드 기록·코인 분배도 함께 지울까요?\n(취소하면 입출금만 지워요)')) {
-          db.snapshots = db.snapshots.filter((x) => x.flow !== d.id);
-          db.coins.forEach((c) => { c.events = c.events.filter((e) => e.flow !== d.id); });
-        }
+        const fmt = (v) => `${v >= 0 ? '+' : '−'}${num(Math.abs(v), 2)}`;
+        const msg = '이 입출금으로 자동 반영된 기록도 함께 되돌릴까요?\n'
+          + (db.snapshots.some((x) => x.flow === d.id) ? '· 총 시드 기록: 반영한 기록 삭제\n' : '')
+          + (plan.length ? `· 코인 시드: ${plan.map((x) => `${x.coin} ${fmt(x.back)}`).join(', ')}\n` : '')
+          + '(취소하면 입출금만 지워요)';
+        if (linked && confirm(msg)) rollbackFlow(d.id);
         if (applying && applying.flowId === d.id) applying = null;
       }
       if (d.del === 'log') db.log = db.log.filter((r) => r.id !== d.id);
