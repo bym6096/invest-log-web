@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v26';
+  const APP_VERSION = 'v27';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -667,6 +667,15 @@
     scrollApply = true;
   }
 
+  // 입출금을 등록하면 총 시드 기록에 바로 반영한다: 직전 기록 ± 입출금액 (직전 기록의 No position 상태 유지)
+  // 같은 날짜에 이미 '입출금 반영 후' 잔고를 직접 적어 둔 경우는 이중 반영을 막기 위해 건너뛴다
+  function autoSnap(f) {
+    if (flowSnap(f)) return;
+    const base = lastSnapBefore(f.date);
+    if (!base || (base.date === f.date && base.after && !base.flow)) return;
+    db.snapshots.push({ id: nid(), date: f.date, balance: round2(base.balance + (f.type === 'in' ? 1 : -1) * f.usd), np: !!base.np, after: true, note: f.type === 'in' ? '입금 후' : '출금 후', flow: f.id });
+  }
+
   function applyCard() {
     if (!applying) return '';
     const f = db.flows.find((x) => x.id === applying.flowId);
@@ -677,6 +686,8 @@
     const showSnap = !flowSnap(f), showDist = !flowDist(f);
     const base = lastSnapBefore(f.date);
     let h = `<div class="applycard"><h3>${f.type === 'in' ? '입금' : '출금'} ${usd(f.usd)} · ${short(f.date)} 반영</h3>`;
+    const done = db.snapshots.find((x) => x.flow === f.id);
+    if (done) h += `<p class="hint">✔ 총 시드 기록에 반영했어요: ${num(done.balance, 2)} (실제 잔고와 다르면 위 시드 기록에서 ✎로 고치세요)</p>`;
     if (showSnap) {
       h += `<label class="chk"><input type="checkbox" data-ap="snapOn"${A.snapOn ? ' checked' : ''}> 총 시드 기록에 반영</label>`;
       if (A.snapOn) {
@@ -962,6 +973,7 @@
         else {
           const nf = { id: nid(), date: e.date || today(), type: 'out', usd: e.amount, note: v.note || '', coin: c.sym, est: false, track: true, dist: 'coin' };
           db.flows.push(nf);
+          autoSnap(nf); // 총 시드 기록에도 바로 반영
           e.flow = nf.id; // 코인 쪽 출금과 연결 → 총 시드 기록 반영 버튼이 입출금 목록에 나온다
         }
       }
@@ -984,7 +996,7 @@
         const ce = findCoin(old.coin).events.find((x) => x.type === 'w' && x.date === old.date && x.amount === old.usd);
         if (ce) Object.assign(ce, { date: r.date, amount: r.usd });
       }
-      if (!id) { r.track = true; db.flows.push(r); startApply(r, true); } // 새 입출금: 반영 패널 열기
+      if (!id) { r.track = true; db.flows.push(r); autoSnap(r); startApply(r, true); } // 새 입출금: 총 시드 자동 반영 + 코인 분배 패널 열기
       formOpen.flow = false;
     }
     if (kind === 'log') {
