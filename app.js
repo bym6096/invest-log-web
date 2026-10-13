@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v25';
+  const APP_VERSION = 'v26';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -11,6 +11,8 @@
   let openCoin = null;
   let formOpen = {};
   let editing = null; // { kind, id }
+  let applying = null; // 입출금 반영 패널 상태
+  let scrollApply = false;
   const isEd = (kind, id) => editing && editing.kind === kind && editing.id === id;
 
   function load() {
@@ -52,8 +54,8 @@
     const dt = new Date(iso + 'T00:00:00Z');
     return !isNaN(dt) && dt.toISOString().slice(0, 10) === iso ? iso : null;
   }
-  const dateInput = (name, value, { req = false, sf, i } = {}) =>
-    `<input type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="예: 20261203" data-date${req ? ' data-req' : ''}${name ? ` name="${name}"` : ''}${sf ? ` data-sf="${sf}" data-i="${i}"` : ''} value="${value === undefined || value === null ? '' : String(value).replace(/"/g, '&quot;')}">`;
+  const dateInput = (name, value, { req = false, sf, i, ro = false } = {}) =>
+    `<input type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="예: 20261203" data-date${req ? ' data-req' : ''}${ro ? ' readonly' : ''}${name ? ` name="${name}"` : ''}${sf ? ` data-sf="${sf}" data-i="${i}"` : ''} value="${value === undefined || value === null ? '' : String(value).replace(/"/g, '&quot;')}">`;
   const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0); // 안정 정렬
 
   // ---------- 계산 ----------
@@ -127,10 +129,14 @@
     });
   }
 
+  // 입출금 ↔ 총 시드 기록·코인 분배의 연결 (자동 반영된 기록에는 flow: 입출금 id 가 붙는다)
+  const flowSnap = (f) => db.snapshots.some((x) => x.flow === f.id);
+  const flowDist = (f) => db.coins.some((c) => c.events.some((e) => e.flow === f.id));
+
   function unmatchedWithdrawals() {
     const out = [];
     db.coins.forEach((c) => c.events.filter((e) => e.type === 'w').forEach((e) => {
-      const ok = db.flows.some((f) => f.type === 'out' && f.date === e.date && f.usd === e.amount);
+      const ok = db.flows.some((f) => (e.flow ? f.id === e.flow : f.type === 'out' && f.date === e.date && f.usd === e.amount));
       if (!ok) out.push({ coin: c.sym, date: e.date, amount: e.amount });
     }));
     return out;
@@ -629,13 +635,106 @@
       <label>메모<input name="note" value="${r ? val(r.note) : ''}"></label><button class="btn">저장</button>${cancelBtn(r)}</form>`;
   }
 
+
+  // ---------- 입출금 반영 (총 시드 기록 + 코인 시드 분배) ----------
+  function lastSnapBefore(date) {
+    const list = snaps().filter((x) => x.date <= date);
+    return list.length ? list[list.length - 1] : null;
+  }
+  // 코인별 비중(합이 100이 아니면 100으로 환산)으로 금액을 나눈다. 반올림 오차는 마지막 코인이 맞춘다
+  function weightShares(total) {
+    const cs = db.coins.filter((c) => c.weight > 0);
+    const sum = cs.reduce((a, c) => a + c.weight, 0);
+    let acc = 0;
+    return cs.map((c, i) => {
+      const amount = i === cs.length - 1 ? round2(total - acc) : round2((total * c.weight) / sum);
+      acc = round2(acc + amount);
+      return { coin: c, pct: (c.weight / sum) * 100, amount, sum };
+    });
+  }
+  function distParts(f, A) {
+    const sign = f.type === 'in' ? 1 : -1;
+    const base = A.dist === 'weight' ? weightShares(f.usd) : A.dist === 'coin' && findCoin(A.coin) ? [{ coin: findCoin(A.coin), pct: 100, amount: f.usd, sum: 100 }] : [];
+    return base.map((p) => { const before = seedAt(p.coin, f.date) || 0; return { ...p, before, after: round2(before + sign * p.amount) }; });
+  }
+  function startApply(f, fresh) {
+    const base = lastSnapBefore(f.date);
+    applying = {
+      flowId: f.id, fresh: !!fresh, snapOn: !flowSnap(f),
+      balance: base ? round2(base.balance + (f.type === 'in' ? 1 : -1) * f.usd) : '', np: base ? !!base.np : false,
+      dist: 'weight', coin: db.coins[0] ? db.coins[0].sym : '',
+    };
+    scrollApply = true;
+  }
+
+  function applyCard() {
+    if (!applying) return '';
+    const f = db.flows.find((x) => x.id === applying.flowId);
+    if (!f) return '';
+    const A = applying;
+    const sign = f.type === 'in' ? 1 : -1;
+    const sg = sign > 0 ? '+' : '−';
+    const showSnap = !flowSnap(f), showDist = !flowDist(f);
+    const base = lastSnapBefore(f.date);
+    let h = `<div class="applycard"><h3>${f.type === 'in' ? '입금' : '출금'} ${usd(f.usd)} · ${short(f.date)} 반영</h3>`;
+    if (showSnap) {
+      h += `<label class="chk"><input type="checkbox" data-ap="snapOn"${A.snapOn ? ' checked' : ''}> 총 시드 기록에 반영</label>`;
+      if (A.snapOn) {
+        h += `<p class="hint">${base ? `직전 기록 ${short(base.date)} · ${num(base.balance, 2)} ${sg} ${num(f.usd, 2)}` : '이전 총 시드 기록이 없어요. 반영 후 총 시드를 직접 입력하세요.'}</p>
+          <label>반영 후 총 시드($) <small class="muted">(바이낸스 실제 잔고로 고쳐도 돼요)</small><input type="number" step="any" data-ap="balance" value="${val(A.balance)}" inputmode="decimal"></label>
+          <label class="chk"><input type="checkbox" data-ap="np"${A.np ? ' checked' : ''}> No position</label>`;
+      }
+    }
+    if (showDist) {
+      const radio = (v, label) => `<label class="radio"><input type="radio" name="apdist" data-ap="dist" value="${v}"${A.dist === v ? ' checked' : ''}> ${label}</label>`;
+      h += `<h3>코인 시드에 ${f.type === 'in' ? '입금' : '출금'} 분배</h3>`
+        + (A.fresh ? radio('none', '분배 안 함 <small class="muted">(나중에 입출금 기록에서 "분배하기")</small>') : '')
+        + radio('weight', '각 코인 비중대로 분배')
+        + radio('coin', `한 코인에 분배 <select data-ap="coin">${db.coins.map((c) => `<option${c.sym === A.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select>`);
+      const parts = distParts(f, A);
+      if (A.dist === 'weight' && !parts.length) h += '<p class="hint warn">비중이 설정된 코인이 없어요. 코인 탭에서 "비중 변경"으로 먼저 설정하세요.</p>';
+      if (parts.length) {
+        h += `<table class="tbl"><thead><tr><th>코인</th><th>비중</th><th>금액</th><th>시드 변화</th></tr></thead><tbody>${parts.map((p) => `<tr><td><b>${esc(p.coin.sym)}</b></td><td>${num(p.pct, 1)}%</td><td>${sg}${num(p.amount, 2)}</td><td>${num(p.before)} → ${num(p.after)}</td></tr>`).join('')}</tbody></table>`;
+        if (A.dist === 'weight' && Math.abs(parts[0].sum - 100) > 0.01) h += `<p class="hint">코인 비중의 합이 ${num(parts[0].sum, 1)}%라서 100%로 환산했어요. 비중은 코인 탭에서 바꿀 수 있어요.</p>`;
+      }
+    }
+    return h + `<button class="btn" data-act="apply">적용</button><button class="btn alt" data-act="applycancel">${A.fresh ? '나중에 하기' : '닫기'}</button></div>`;
+  }
+
+  function applyFlow() {
+    const A = applying;
+    const f = A && db.flows.find((x) => x.id === A.flowId);
+    if (!f) return;
+    const inp = document.querySelector('[data-ap=balance]');
+    if (inp) A.balance = inp.value;
+    const sign = f.type === 'in' ? 1 : -1;
+    const doSnap = !flowSnap(f) && A.snapOn;
+    const doDist = !flowDist(f) && (A.dist === 'weight' || A.dist === 'coin');
+    const bal = parseFloat(A.balance);
+    if (doSnap && !(bal >= 0)) { alert('반영 후 총 시드를 숫자로 입력하세요.'); return; }
+    const parts = doDist ? distParts(f, A) : [];
+    if (doDist && !parts.length) { alert(A.dist === 'weight' ? '비중이 설정된 코인이 없어요.' : '코인을 선택하세요.'); return; }
+    if (doSnap) db.snapshots.push({ id: nid(), date: f.date, balance: bal, np: !!A.np, after: true, note: f.type === 'in' ? '입금 후' : '출금 후', flow: f.id });
+    parts.forEach((p) => {
+      const ev = f.type === 'in'
+        ? { id: nid(), seed: p.after, date: f.date, type: 'd', note: '입금 분배', flow: f.id }
+        : { id: nid(), seed: p.after, date: f.date, type: 'w', amount: p.amount, note: '출금 분배', flow: f.id };
+      insertEvent(p.coin, ev);
+    });
+    if (doDist) { f.dist = A.dist; if (A.dist === 'coin') f.coin = A.coin; }
+    applying = null;
+    commit();
+  }
+
   function flowForm(f) {
     const t = f ? f.type : 'out';
+    const lock = !!f && f.track && (flowSnap(f) || flowDist(f)); // 자동 반영된 입출금은 금액·날짜·구분 변경 불가
     return `<form class="form" data-form="flow"${f ? ` data-id="${f.id}"` : ''}><div class="grid2">
-      <label>구분<select name="type"><option value="out"${t === 'out' ? ' selected' : ''}>출금</option><option value="in"${t === 'in' ? ' selected' : ''}>입금</option></select></label>
-      <label>날짜${dateInput('date', f ? f.date : today(), { req: true })}</label>
-      <label>금액($)<input type="number" step="any" name="usd" value="${f ? f.usd : ''}" required inputmode="decimal"></label>
-      <label>코인 시드에서 출금<select name="coin"><option value="">총 시드에서만</option>${db.coins.map((c) => `<option${f && f.coin === c.sym ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label></div>
+      <label>구분<select name="type"${lock ? ' disabled' : ''}><option value="out"${t === 'out' ? ' selected' : ''}>출금</option><option value="in"${t === 'in' ? ' selected' : ''}>입금</option></select></label>
+      <label>날짜${dateInput('date', f ? f.date : today(), { req: true, ro: lock })}</label>
+      <label>금액($)<input type="number" step="any" name="usd" value="${f ? f.usd : ''}" required inputmode="decimal"${lock ? ' readonly' : ''}></label>
+      ${f ? `<label>코인 시드에서 출금<select name="coin"><option value="">총 시드에서만</option>${db.coins.map((c) => `<option${f.coin === c.sym ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select></label>` : ''}</div>
+      ${lock ? '<p class="hint">자동 반영된 입출금은 금액·날짜·구분을 바꾸려면 삭제하고 다시 등록하세요 (연결된 시드 기록도 함께 지울 수 있어요).</p>' : ''}
       <label class="chk"><input type="checkbox" name="est"${f && f.est ? ' checked' : ''}> 추정 금액</label>
       <label>메모<input name="note" value="${f ? val(f.note) : ''}"></label><button class="btn">저장</button>${cancelBtn(f)}</form>`;
   }
@@ -668,6 +767,7 @@
         ${isOpen ? `
           <button class="link" data-act="addev" data-coin="${esc(c.sym)}">${formOpen['ev' + c.sym] ? '닫기' : '+ 기록 추가'}</button>
           <button class="link" data-act="lev" data-coin="${esc(c.sym)}">레버리지 변경</button>
+          <button class="link" data-act="weight" data-coin="${esc(c.sym)}">비중 변경 (${c.weight || 0}%)</button>
           ${formOpen['ev' + c.sym] ? coinForm(c) : ''}
           <ul class="list">${[...st.rows].reverse().map((e) => isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : `
             <li><span class="d">${short(e.date)}</span>
@@ -679,6 +779,15 @@
           <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화(금액과 %)입니다. 출금은 출금액을 되돌려 계산해요. 최종 손익 합은 현재 시드에서 첫 시드를 뺀 값이에요 (출금·밸런스조정·시드추가도 그대로 반영된 값).</p>` : ''}
       </section>`;
     }).join('') + `<button class="link" data-act="addcoin">+ 코인 추가</button>`;
+  }
+
+  // 자동 반영 상태 표시와 (아직 안 한 경우) 반영·분배하기 버튼
+  function flowChips(f) {
+    if (!f.track) return '';
+    const sn = flowSnap(f), ds = flowDist(f);
+    let h = `${sn ? ' <span class="chip">시드 반영됨</span>' : ''}${ds ? ` <span class="chip">분배: ${f.dist === 'weight' ? '비중' : esc(f.coin || '')}</span>` : ''}`;
+    if (!sn || !ds) h += `<br><button class="link" data-act="applyflow" data-id="${f.id}">${!ds ? (sn ? '분배하기' : '반영·분배하기') : '시드 기록에 반영'}</button>`;
+    return h;
   }
 
   function viewRec() {
@@ -710,7 +819,8 @@
     <section class="card"><h2>입출금 (USD)</h2>
       <button class="link" data-act="addflow">${formOpen.flow ? '닫기' : '+ 입출금 추가'}</button>
       ${formOpen.flow ? flowForm() : ''}
-      <ul class="list">${fl.map((f) => isEd('flow', f.id) ? `<li class="editli">${flowForm(f)}</li>` : `<li><span class="d">${short(f.date)}</span><span class="badge ${f.type === 'in' ? 'b-in' : 'b-w'}">${f.type === 'in' ? '입금' : '출금'}</span><span class="grow">${usd(f.usd)}${f.est ? ' <span class="chip warnc">추정</span>' : ''}${f.coin ? ` <span class="chip">${esc(f.coin)}</span>` : ''}${f.note ? ` <small class="muted">${esc(f.note)}</small>` : ''}</span>${editBtn('flow', f.id)}<button class="x" data-del="flow" data-id="${f.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
+      ${applyCard()}
+      <ul class="list">${fl.map((f) => isEd('flow', f.id) ? `<li class="editli">${flowForm(f)}</li>` : `<li><span class="d">${short(f.date)}</span><span class="badge ${f.type === 'in' ? 'b-in' : 'b-w'}">${f.type === 'in' ? '입금' : '출금'}</span><span class="grow">${usd(f.usd)}${f.est ? ' <span class="chip warnc">추정</span>' : ''}${f.coin ? ` <span class="chip">${esc(f.coin)}</span>` : ''}${f.note ? ` <small class="muted">${esc(f.note)}</small>` : ''}${flowChips(f)}</span>${editBtn('flow', f.id)}<button class="x" data-del="flow" data-id="${f.id}" aria-label="삭제">×</button></li>`).join('')}</ul>
     </section>`;
   }
 
@@ -736,6 +846,7 @@
   const VIEWS = { sum: viewSum, coins: viewCoins, rec: viewRec, log: viewLog, set: viewSet };
   function render() {
     $('#view').innerHTML = VIEWS[tab]();
+    if (scrollApply) { scrollApply = false; const el = $('.applycard'); if (el) el.scrollIntoView({ block: 'center' }); }
     $$('nav button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
   }
 
@@ -755,7 +866,15 @@
       if (!confirm('삭제할까요?')) return;
       if (d.del === 'ev') { const c = findCoin(d.coin); c.events = c.events.filter((e) => e.id !== d.id); }
       if (d.del === 'snap') db.snapshots = db.snapshots.filter((r) => r.id !== d.id);
-      if (d.del === 'flow') db.flows = db.flows.filter((r) => r.id !== d.id);
+      if (d.del === 'flow') {
+        const linked = db.snapshots.some((x) => x.flow === d.id) || db.coins.some((c) => c.events.some((e) => e.flow === d.id));
+        db.flows = db.flows.filter((r) => r.id !== d.id);
+        if (linked && confirm('이 입출금으로 자동 반영된 총 시드 기록·코인 분배도 함께 지울까요?\n(취소하면 입출금만 지워요)')) {
+          db.snapshots = db.snapshots.filter((x) => x.flow !== d.id);
+          db.coins.forEach((c) => { c.events = c.events.filter((e) => e.flow !== d.id); });
+        }
+        if (applying && applying.flowId === d.id) applying = null;
+      }
       if (d.del === 'log') db.log = db.log.filter((r) => r.id !== d.id);
       commit();
     } else if (d.act) {
@@ -764,6 +883,14 @@
       if (d.act === 'addsnap') toggle('snap');
       if (d.act === 'addflow') toggle('flow');
       if (d.act === 'addlog') toggle('log');
+      if (d.act === 'applyflow') { const f = db.flows.find((x) => x.id === d.id); if (f) { startApply(f, false); render(); } }
+      if (d.act === 'apply') applyFlow();
+      if (d.act === 'applycancel') { applying = null; render(); }
+      if (d.act === 'weight') {
+        const c = findCoin(d.coin);
+        const v = parseFloat(prompt(`${c.sym} 비중(%) — 입출금 분배에 쓰여요`, c.weight || 0));
+        if (v >= 0) { c.weight = v; commit(); }
+      }
       if (d.act === 'lev') {
         const c = findCoin(d.coin);
         const v = parseFloat(prompt(`${c.sym} 레버리지 (현재 x${c.lev})`, c.lev));
@@ -832,7 +959,11 @@
         // 총 시드 출금과 연결: 기존 짝이 있으면 같이 수정, 없으면 새로 만든다
         const link = old.type === 'w' && db.flows.find((x) => x.type === 'out' && x.date === old.date && x.usd === old.amount);
         if (link) Object.assign(link, { date: e.date || link.date, usd: e.amount, coin: c.sym });
-        else db.flows.push({ id: nid(), date: e.date || today(), type: 'out', usd: e.amount, note: v.note || '', coin: c.sym, est: false });
+        else {
+          const nf = { id: nid(), date: e.date || today(), type: 'out', usd: e.amount, note: v.note || '', coin: c.sym, est: false, track: true, dist: 'coin' };
+          db.flows.push(nf);
+          e.flow = nf.id; // 코인 쪽 출금과 연결 → 총 시드 기록 반영 버튼이 입출금 목록에 나온다
+        }
       }
       if (!id) c.events.push(e);
       formOpen['ev' + c.sym] = false;
@@ -846,13 +977,14 @@
     if (kind === 'flow') {
       const r = id ? db.flows.find((x) => x.id === id) : { id: nid() };
       const old = { date: r.date, usd: r.usd, coin: r.coin };
+      if (id && r.track && (flowSnap(r) || flowDist(r))) { v.date = r.date; v.type = r.type; v.usd = r.usd; v.coin = r.coin; } // 자동 반영된 입출금은 이 값들을 바꾸지 않는다
       Object.assign(r, { date: v.date, type: v.type, usd: +v.usd, note: v.note || '', coin: v.coin || '', est: !!v.est });
       if (id && old.coin && old.coin === r.coin) {
         // 코인 쪽 출금 기록도 같은 날짜/금액으로 맞춘다
         const ce = findCoin(old.coin).events.find((x) => x.type === 'w' && x.date === old.date && x.amount === old.usd);
         if (ce) Object.assign(ce, { date: r.date, amount: r.usd });
       }
-      if (!id) db.flows.push(r);
+      if (!id) { r.track = true; db.flows.push(r); startApply(r, true); } // 새 입출금: 반영 패널 열기
       formOpen.flow = false;
     }
     if (kind === 'log') {
@@ -868,6 +1000,17 @@
     if (ev.target.id === 'ocrfile') {
       const files = [...ev.target.files].slice(0, 5);
       if (files.length) runOcr(files);
+      return;
+    }
+    const ap = ev.target.dataset.ap;
+    if (ap && applying) {
+      // 입출금 반영 패널의 선택 변경
+      const t = ev.target;
+      if (ap === 'snapOn' || ap === 'np') applying[ap] = t.checked;
+      else if (ap === 'balance') applying.balance = t.value;
+      else if (ap === 'coin') { applying.coin = t.value; applying.dist = 'coin'; }
+      else applying[ap] = t.value; // dist
+      render();
       return;
     }
     const sf = ev.target.dataset.sf;
