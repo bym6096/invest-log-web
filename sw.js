@@ -1,5 +1,5 @@
-const CACHE = 'invest-v28';
-const FILES = ['./', 'index.html', 'style.css?v=v28', 'app.js?v=v28', 'manifest.webmanifest', 'icon.svg'];
+const CACHE = 'invest-v30';
+const FILES = ['./', 'index.html', 'style.css?v=v30', 'app.js?v=v30', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
   // cache: 'reload' — 브라우저 HTTP 캐시(GitHub Pages는 10분)를 건너뛰고 항상 최신 파일을 받는다

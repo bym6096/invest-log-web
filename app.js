@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v28';
+  const APP_VERSION = 'v30';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -641,20 +641,20 @@
     const list = snaps().filter((x) => x.date <= date);
     return list.length ? list[list.length - 1] : null;
   }
-  // 코인별 비중(합이 100이 아니면 100으로 환산)으로 금액을 나눈다. 반올림 오차는 마지막 코인이 맞춘다
-  function weightShares(total) {
-    const cs = db.coins.filter((c) => c.weight > 0);
-    const sum = cs.reduce((a, c) => a + c.weight, 0);
+  // 각 코인의 현재 시드(레버리지 제외)를 비중으로 금액을 나눈다. 반올림 오차는 마지막 코인이 맞춘다
+  function weightShares(total, date) {
+    const cs = db.coins.map((c) => ({ c, seed: seedAt(c, date) || 0 })).filter((x) => x.seed > 0);
+    const sum = cs.reduce((a, x) => a + x.seed, 0);
     let acc = 0;
-    return cs.map((c, i) => {
-      const amount = i === cs.length - 1 ? round2(total - acc) : round2((total * c.weight) / sum);
+    return cs.map((x, i) => {
+      const amount = i === cs.length - 1 ? round2(total - acc) : round2((total * x.seed) / sum);
       acc = round2(acc + amount);
-      return { coin: c, pct: (c.weight / sum) * 100, amount, sum };
+      return { coin: x.c, seed: x.seed, pct: (x.seed / sum) * 100, amount, sum };
     });
   }
   function distParts(f, A) {
     const sign = f.type === 'in' ? 1 : -1;
-    const base = A.dist === 'weight' ? weightShares(f.usd) : A.dist === 'coin' && findCoin(A.coin) ? [{ coin: findCoin(A.coin), pct: 100, amount: f.usd, sum: 100 }] : [];
+    const base = A.dist === 'weight' ? weightShares(f.usd, f.date) : A.dist === 'coin' && findCoin(A.coin) ? [{ coin: findCoin(A.coin), seed: seedAt(findCoin(A.coin), f.date) || 0, pct: 100, amount: f.usd, sum: 100 }] : [];
     return base.map((p) => { const before = seedAt(p.coin, f.date) || 0; return { ...p, before, after: round2(before + sign * p.amount) }; });
   }
   function startApply(f, fresh) {
@@ -723,13 +723,13 @@
       const radio = (v, label) => `<label class="radio"><input type="radio" name="apdist" data-ap="dist" value="${v}"${A.dist === v ? ' checked' : ''}> ${label}</label>`;
       h += `<h3>코인 시드에 ${f.type === 'in' ? '입금' : '출금'} 분배</h3>`
         + (A.fresh ? radio('none', '분배 안 함 <small class="muted">(나중에 입출금 기록에서 "분배하기")</small>') : '')
-        + radio('weight', '각 코인 비중대로 분배')
+        + radio('weight', '각 코인 현재 시드 비중대로 분배')
         + radio('coin', `한 코인에 분배 <select data-ap="coin">${db.coins.map((c) => `<option${c.sym === A.coin ? ' selected' : ''}>${esc(c.sym)}</option>`).join('')}</select>`);
       const parts = distParts(f, A);
-      if (A.dist === 'weight' && !parts.length) h += '<p class="hint warn">비중이 설정된 코인이 없어요. 코인 탭에서 "비중 변경"으로 먼저 설정하세요.</p>';
+      if (A.dist === 'weight' && !parts.length) h += '<p class="hint warn">시드가 있는 코인이 없어요.</p>';
       if (parts.length) {
-        h += `<table class="tbl"><thead><tr><th>코인</th><th>비중</th><th>금액</th><th>시드 변화</th></tr></thead><tbody>${parts.map((p) => `<tr><td><b>${esc(p.coin.sym)}</b></td><td>${num(p.pct, 1)}%</td><td>${sg}${num(p.amount, 2)}</td><td>${num(p.before)} → ${num(p.after)}</td></tr>`).join('')}</tbody></table>`;
-        if (A.dist === 'weight' && Math.abs(parts[0].sum - 100) > 0.01) h += `<p class="hint">코인 비중의 합이 ${num(parts[0].sum, 1)}%라서 100%로 환산했어요. 비중은 코인 탭에서 바꿀 수 있어요.</p>`;
+        h += `<table class="tbl"><thead><tr><th>코인</th><th>시드 비중</th><th>금액</th><th>시드 변화</th></tr></thead><tbody>${parts.map((p) => `<tr><td><b>${esc(p.coin.sym)}</b></td><td>${num(p.pct, 1)}%<br><small class="muted">${usd(p.seed)}</small></td><td>${sg}${num(p.amount, 2)}</td><td>${num(p.before)} → ${num(p.after)}</td></tr>`).join('')}</tbody></table>`;
+        if (A.dist === 'weight') h += `<p class="hint">각 코인의 현재 시드 합 ${usd(parts[0].sum)} 기준 비율이에요 (레버리지는 반영하지 않아요).</p>`;
       }
     }
     return h + `<button class="btn" data-act="apply">적용</button><button class="btn alt" data-act="applycancel">${A.fresh ? '나중에 하기' : '닫기'}</button></div>`;
@@ -801,7 +801,6 @@
         ${isOpen ? `
           <button class="link" data-act="addev" data-coin="${esc(c.sym)}">${formOpen['ev' + c.sym] ? '닫기' : '+ 기록 추가'}</button>
           <button class="link" data-act="lev" data-coin="${esc(c.sym)}">레버리지 변경</button>
-          <button class="link" data-act="weight" data-coin="${esc(c.sym)}">비중 변경 (${c.weight || 0}%)</button>
           ${formOpen['ev' + c.sym] ? coinForm(c) : ''}
           <ul class="list">${[...st.rows].reverse().map((e) => isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : `
             <li><span class="d">${short(e.date)}</span>
@@ -923,11 +922,6 @@
       if (d.act === 'applyflow') { const f = db.flows.find((x) => x.id === d.id); if (f) { startApply(f, false); render(); } }
       if (d.act === 'apply') applyFlow();
       if (d.act === 'applycancel') { applying = null; render(); }
-      if (d.act === 'weight') {
-        const c = findCoin(d.coin);
-        const v = parseFloat(prompt(`${c.sym} 비중(%) — 입출금 분배에 쓰여요`, c.weight || 0));
-        if (v >= 0) { c.weight = v; commit(); }
-      }
       if (d.act === 'lev') {
         const c = findCoin(d.coin);
         const v = parseFloat(prompt(`${c.sym} 레버리지 (현재 x${c.lev})`, c.lev));
