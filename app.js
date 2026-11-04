@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v30';
+  const APP_VERSION = 'v31';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -57,6 +57,52 @@
   const dateInput = (name, value, { req = false, sf, i, ro = false } = {}) =>
     `<input type="text" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="예: 20261203" data-date${req ? ' data-req' : ''}${ro ? ' readonly' : ''}${name ? ` name="${name}"` : ''}${sf ? ` data-sf="${sf}" data-i="${i}"` : ''} value="${value === undefined || value === null ? '' : String(value).replace(/"/g, '&quot;')}">`;
   const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0); // 안정 정렬
+
+  // 날짜+시각 입력 (202610011012 / 20261001101233 / 2026-10-01 10:12:33 → 'YYYY-MM-DD HH:MM[:SS]'). 날짜만 넣어도 된다. 빈 값은 '', 형식 오류는 null
+  function parseDateTimeText(t) {
+    const s = String(t).trim();
+    if (!s) return '';
+    let y, mo, d, hh, mi, ss;
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (m) [, y, mo, d, hh, mi, ss] = m;
+    else {
+      const g = s.replace(/\D/g, '');
+      if (![8, 12, 14].includes(g.length)) return null;
+      [y, mo, d] = [g.slice(0, 4), g.slice(4, 6), g.slice(6, 8)];
+      if (g.length >= 12) [hh, mi] = [g.slice(8, 10), g.slice(10, 12)];
+      if (g.length === 14) ss = g.slice(12, 14);
+    }
+    const iso = parseDateText(y + mo + d);
+    if (!iso) return null;
+    if (hh === undefined) return iso;
+    if (+hh > 23 || +mi > 59 || (ss !== undefined && +ss > 59)) return null;
+    return `${iso} ${hh}:${mi}${ss !== undefined ? ':' + ss : ''}`;
+  }
+  const dtInput = (name, value, { sf, i } = {}) =>
+    `<input type="text" inputmode="numeric" autocomplete="off" maxlength="19" placeholder="예: 202610011012" data-dt${name ? ` name="${name}"` : ''}${sf ? ` data-sf="${sf}" data-i="${i}"` : ''} value="${value ? String(value).replace(/"/g, '&quot;') : ''}">`;
+  // 진입~종료 보유기간 (시각이 둘 다 있으면 일·시간·분, 하나라도 날짜뿐이면 날짜 차이로)
+  function holdText(a, b) {
+    if (!a || !b) return '';
+    const dateOnly = a.length <= 10 || b.length <= 10;
+    const ts = (s) => Date.parse(dateOnly ? s.slice(0, 10) + 'T00:00:00Z' : s.replace(' ', 'T') + 'Z');
+    const ms = ts(b) - ts(a);
+    if (!(ms >= 0)) return '';
+    const days = Math.floor(ms / 86400000);
+    if (dateOnly) return days ? `${days}일` : '당일';
+    const hrs = Math.floor((ms % 86400000) / 3600000), min = Math.floor((ms % 3600000) / 60000);
+    return [days && `${days}일`, hrs && `${hrs}시간`, min && `${min}분`].filter(Boolean).join(' ') || '1분 미만';
+  }
+  const px = (x) => (x === undefined || x === null || x === '' ? '' : Number(x).toLocaleString('en-US', { maximumFractionDigits: 10 }));
+  const stamp = (s) => (s ? s.slice(2, 16).replace(/-/g, '/') : '');
+  // 거래 기록에 붙는 진입·매도 가격, 진입·종료 시각, 보유기간 (있는 것만 표시)
+  function tradeLine(e) {
+    const out = [];
+    if (e.entryPrice !== undefined || e.exitPrice !== undefined) out.push(`진입 ${px(e.entryPrice) || '–'} → 매도 ${px(e.exitPrice) || '–'}`);
+    if (e.openAt || e.closeAt) out.push(`${stamp(e.openAt) || '–'} → ${stamp(e.closeAt) || '–'}`);
+    const h = holdText(e.openAt, e.closeAt);
+    if (h) out.push(`보유 ${h}`);
+    return out.length ? `<br><small class="muted">${out.map(esc).join(' · ')}</small>` : '';
+  }
 
   // ---------- 계산 ----------
   const snaps = () => [...db.snapshots].sort(byDate);
@@ -192,6 +238,27 @@
     return sign * parseFloat(t);
   }
 
+  // 글자 인식 결과의 날짜 덩어리를 'YYYY-MM-DD HH:MM:SS' (시각이 없으면 날짜만)로 통일
+  function normDT(t) {
+    const m = t.match(/(\d{4})-(\d{2})-(\d{2})(?:[\s-](\d{2})[:.-](\d{2})[:.-](\d{2}))?/);
+    return `${m[1]}-${m[2]}-${m[3]}${m[4] ? ` ${m[4]}:${m[5]}:${m[6]}` : ''}`;
+  }
+  // 카드 글자(공백 단위)에서 진입·매도 가격을 찾는다. 라벨 순서대로 라벨 뒤의 숫자(부호·% 없음)를 짝지어, 라벨이 숫자 위에 있든 옆에 있든 읽힌다
+  function findPrices(words) {
+    const priceAt = (re) => words.findIndex((w, i) => re.test(w) && /^Price/i.test(words[i + 1] || ''));
+    const labels = [{ key: 'entry', at: priceAt(/^Entry$/i) }, { key: 'exit', at: priceAt(/^(Close|Closing|Exit)$/i) }]
+      .filter((l) => l.at >= 0).sort((a, b) => a.at - b.at);
+    const res = { entry: null, exit: null };
+    if (!labels.length) return res;
+    const last = labels[labels.length - 1].at;
+    const nums = [];
+    for (let i = labels[0].at + 2; i < Math.min(words.length, last + 12) && nums.length < labels.length; i++) {
+      if (/^\d(?:[\d.,]*\d)?$/.test(words[i])) nums.push(toNum(words[i]));
+    }
+    labels.forEach((l, k) => { if (nums[k] !== undefined && isFinite(nums[k])) res[l.key] = nums[k]; });
+    return res;
+  }
+
   function parseBinanceText(raw) {
     const text = String(raw).replace(/[−–—]/g, '-').replace(/ /g, ' ');
     // 1) 손익 상세 팝업: "Realized PNL +7,602.85 USDT"(값이 붙은 형태) 또는 "Realized PNL ... Closing PNL"(라벨이 먼저 나오는 형태)로 찾는다.
@@ -218,7 +285,7 @@
       const from = Math.max(0, words.findIndex((w) => /^PNL/i.test(w)));
       const first = words.slice(from).find((w) => NUM.test(w) || w === '--'); // PNL 라벨 뒤에서 가장 먼저 나오는 숫자가 실현 손익
       const coin = m[1].replace(/^1000+/, '');
-      const it = { coin, amount: null, date: '', funding: null, fee: null, note: '', source: `${m[0]} ${first || ''}`.trim() };
+      const it = { coin, amount: null, date: '', funding: null, fee: null, entryPrice: null, exitPrice: null, openAt: '', closeAt: '', note: '', source: `${m[0]} ${first || ''}`.trim() };
       if (!first || first === '--') { it.note = '실현 손익을 읽지 못했어요 (2026년 이전 포지션은 "--"로 표시돼요)'; return it; }
       // 글자 인식이 소수점을 공백으로 읽은 경우 (-2,844 64 -25.86% → -2,844.64)
       const fi = from + words.slice(from).indexOf(first);
@@ -228,8 +295,18 @@
       const roiWord = words.find((w) => /%$/.test(w));
       it.roiNeg = roiWord ? /^-/.test(roiWord) : null;
       if (!words.some((w) => /%$/.test(w))) it.note = 'ROI를 찾지 못했어요. 손익 값을 꼭 확인하세요';
-      if (dts.length >= 2) it.date = dts.slice().sort().pop().slice(0, 10); // 종료 시각은 시작 시각보다 늦다
-      else it.note = (it.note ? it.note + ' / ' : '') + '종료 날짜를 못 찾았어요';
+      const warn = (msg) => { it.note = (it.note ? it.note + ' / ' : '') + msg; };
+      if (dts.length >= 2) {
+        // 종료 시각은 시작 시각보다 늦다
+        const ts = dts.map(normDT).sort();
+        it.openAt = ts[0]; it.closeAt = ts[ts.length - 1];
+        it.date = it.closeAt.slice(0, 10);
+      } else warn('종료 날짜를 못 찾았어요');
+      // 진입·매도 가격: 'Avg Entry Price'·'Avg Close Price' 라벨 뒤에 나오는 숫자를 순서대로 (라벨 옆이든 아래든 순서가 같다)
+      const prices = findPrices(words);
+      it.entryPrice = prices.entry; it.exitPrice = prices.exit;
+      if (prices.entry === null || prices.exit === null) warn('가격(진입/매도)을 다 읽지 못했어요. 직접 입력하세요');
+      if (dts.length >= 2 && !/\d{2}:\d{2}/.test(it.openAt + it.closeAt)) warn('시각(시:분)을 못 읽어 날짜만 기록돼요');
       return it;
     });
     // 3) 상세 팝업의 펀딩비·수수료를 실현 손익이 같은 카드에 붙인다. 같은 카드가 없고 상세가 안 붙은 카드가 하나뿐이면(글자 오인식 가능) 그 카드에 붙이고 확인을 요청
@@ -401,7 +478,7 @@
         if (focus && !x.matched) note = (note ? note + ' / ' : '') + '손익 상세 팝업과 다른 카드예요. 필요하면 체크하세요';
         // 날짜를 못 읽은 카드는 화면이 잘린 경우가 많아 기본 해제
         const on = !bad && !!coin && !!x.date && (!focus || !!x.matched);
-        return { on, coin, amount: bad ? 0 : x.amount, date: x.date, funding: x.funding, fee: x.fee, note, source: x.source };
+        return { on, coin, amount: bad ? 0 : x.amount, date: x.date, funding: x.funding, fee: x.fee, entryPrice: x.entryPrice, exitPrice: x.exitPrice, openAt: x.openAt, closeAt: x.closeAt, note, source: x.source };
       }),
     };
     sortShot();
@@ -446,9 +523,11 @@
     let n = 0;
     shot.items.forEach((it, i) => {
       if (!it.on || !plans[i]) return;
-      const ev = { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note && /^(상세|ROI|종료)/.test(it.note) ? undefined : (it.note || undefined) };
+      const ev = { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note && /^(상세|ROI|종료|가격|시각)/.test(it.note) ? undefined : (it.note || undefined) };
       if (it.funding !== null && it.funding !== undefined && it.funding !== '') ev.funding = +it.funding;
       if (it.fee !== null && it.fee !== undefined && it.fee !== '') ev.fee = +it.fee;
+      for (const k of ['entryPrice', 'exitPrice']) if (it[k] !== null && it[k] !== undefined && it[k] !== '') ev[k] = +it[k];
+      for (const k of ['openAt', 'closeAt']) if (it[k]) ev[k] = it[k];
       insertEvent(findCoin(it.coin), ev);
       n++;
     });
@@ -474,7 +553,12 @@
             <label>날짜${dateInput(null, it.date, { sf: 'date', i })}</label>
             <label>펀딩비($)<input type="number" step="any" data-sf="funding" data-i="${i}" value="${optNum(it.funding)}" inputmode="decimal"></label>
             <label>거래수수료($)<input type="number" step="any" data-sf="fee" data-i="${i}" value="${optNum(it.fee)}" inputmode="decimal"></label>
+            <label>진입 가격<input type="number" step="any" data-sf="entryPrice" data-i="${i}" value="${optNum(it.entryPrice)}" inputmode="decimal"></label>
+            <label>매도 가격<input type="number" step="any" data-sf="exitPrice" data-i="${i}" value="${optNum(it.exitPrice)}" inputmode="decimal"></label>
+            <label>진입 시각${dtInput(null, it.openAt, { sf: 'openAt', i })}</label>
+            <label>종료 시각${dtInput(null, it.closeAt, { sf: 'closeAt', i })}</label>
           </div>
+          ${holdText(it.openAt, it.closeAt) ? `<div class="hint">보유기간 <b>${esc(holdText(it.openAt, it.closeAt))}</b></div>` : ''}
           ${pv ? `<div class="hint">${esc(it.coin)} 시드 ${num(pv.before)} → <b>${num(pv.after)}</b></div>` : ''}
           ${isDup(it) ? '<div class="hint warn">⚠ 같은 날짜·손익의 기록이 이미 있어요 (중복이면 저장하지 마세요)</div>' : ''}
           ${!it.coin ? '<div class="hint warn">⚠ 코인을 선택해야 저장할 수 있어요</div>' : ''}
@@ -621,6 +705,10 @@
         <label>출금액($, 출금일 때)<input type="number" step="any" name="amount" value="${e ? val(e.amount) : ''}" inputmode="decimal"></label>
         <label>펀딩비($, 지출은 −)<input type="number" step="any" name="funding" value="${e ? val(e.funding) : ''}" inputmode="decimal"></label>
         <label>거래수수료($, 지출은 −)<input type="number" step="any" name="fee" value="${e ? val(e.fee) : ''}" inputmode="decimal"></label>
+        <label>진입 가격<input type="number" step="any" name="entryPrice" value="${e ? val(e.entryPrice) : ''}" inputmode="decimal"></label>
+        <label>매도 가격<input type="number" step="any" name="exitPrice" value="${e ? val(e.exitPrice) : ''}" inputmode="decimal"></label>
+        <label>진입 시각${dtInput('openAt', e ? e.openAt : '')}</label>
+        <label>종료 시각${dtInput('closeAt', e ? e.closeAt : '')}</label>
       </div>
       <label>메모<input name="note" value="${e ? val(e.note) : ''}"></label>
       <button class="btn">저장</button>${cancelBtn(e)}</form>`;
@@ -805,7 +893,7 @@
           <ul class="list">${[...st.rows].reverse().map((e) => isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : `
             <li><span class="d">${short(e.date)}</span>
             <span class="badge b-${e.type}">${TYPE_LABEL[e.type]}</span>
-            <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}${e.funding || e.fee ? `<br><small class="muted">${e.funding ? `펀딩 ${signed(e.funding, 2)}` : ''}${e.funding && e.fee ? ' · ' : ''}${e.fee ? `수수료 ${signed(e.fee, 2)}` : ''}</small>` : ''}</span>
+            <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}${e.funding || e.fee ? `<br><small class="muted">${e.funding ? `펀딩 ${signed(e.funding, 2)}` : ''}${e.funding && e.fee ? ' · ' : ''}${e.fee ? `수수료 ${signed(e.fee, 2)}` : ''}</small>` : ''}${tradeLine(e)}</span>
             <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : `${signed(e.delta)}${e.prev ? `<br><small>${signed((e.delta / e.prev) * 100, 1)}%</small>` : ''}`}</span>
             ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button></li>`).join('')}
           </ul>
@@ -976,6 +1064,12 @@
       if (!iso) { alert('날짜 형식을 확인하세요. 예: 20261203'); return; }
       v[inp.name] = iso;
     }
+    for (const inp of f.querySelectorAll('[data-dt]')) {
+      const dt = parseDateTimeText(inp.value);
+      if (dt === null) { alert('시각 형식을 확인하세요. 예: 202610011012 (연월일시분)'); return; }
+      v[inp.name] = dt;
+    }
+    if (v.openAt && v.closeAt && holdText(v.openAt, v.closeAt) === '') { alert('종료 시각이 진입 시각보다 빠릅니다. 확인하세요.'); return; }
     if (kind === 'alert') { db.alertExpiry = v.date; formOpen.alert = false; commit(); return; }
     const id = f.dataset.id;
     editing = null;
@@ -985,7 +1079,10 @@
       const old = { type: e.type, date: e.date, amount: e.amount };
       Object.assign(e, { seed: +v.seed, date: v.date || null, type: v.type, note: v.note || undefined });
       if (v.type === 'w') e.amount = +v.amount || 0; else delete e.amount;
-      for (const k of ['funding', 'fee']) { if (v[k] === '' || v[k] === undefined) delete e[k]; else e[k] = +v[k]; }
+      for (const k of ['funding', 'fee', 'entryPrice', 'exitPrice']) { if (v[k] === '' || v[k] === undefined) delete e[k]; else e[k] = +v[k]; }
+      for (const k of ['openAt', 'closeAt']) { if (!v[k]) delete e[k]; else e[k] = v[k]; }
+      // 날짜 칸을 직접 바꾸지 않았다면(비움·새 기록의 기본값 오늘·수정 전 그대로) 기록 날짜는 종료 시각의 날짜를 따른다
+      if (e.closeAt && (!v.date || (id ? v.date === old.date : v.date === today()))) e.date = e.closeAt.slice(0, 10);
       if (v.type === 'w' && e.amount) {
         // 총 시드 출금과 연결: 기존 짝이 있으면 같이 수정, 없으면 새로 만든다
         const link = old.type === 'w' && db.flows.find((x) => x.type === 'out' && x.date === old.date && x.usd === old.amount);
@@ -1055,7 +1152,12 @@
         if (iso === null) alert('날짜 형식을 확인하세요. 예: 20261203'); else it.date = iso;
       }
       else if (sf === 'amount') it.amount = parseFloat(t.value) || 0;
-      else if (sf === 'funding' || sf === 'fee') it[sf] = t.value === '' ? null : parseFloat(t.value);
+      else if (sf === 'funding' || sf === 'fee' || sf === 'entryPrice' || sf === 'exitPrice') it[sf] = t.value === '' ? null : parseFloat(t.value);
+      else if (sf === 'openAt' || sf === 'closeAt') {
+        const dt = parseDateTimeText(t.value);
+        if (dt === null) alert('시각 형식을 확인하세요. 예: 202610011012 (연월일시분)');
+        else { it[sf] = dt; if (sf === 'closeAt' && dt) it.date = dt.slice(0, 10); } // 종료 시각이 곧 기록 날짜
+      }
       else it[sf] = t.value;
       if (sf === 'coin') it.on = !!it.coin;
       sortShot();
