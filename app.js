@@ -1,6 +1,6 @@
 (function () {
   const KEY = 'invest.v1';
-  const APP_VERSION = 'v31';
+  const APP_VERSION = 'v32';
   const TYPE_LABEL = { i: '초기', t: '거래', r: '밸런스', w: '출금', d: '시드추가' };
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -12,6 +12,7 @@
   let formOpen = {};
   let editing = null; // { kind, id }
   let applying = null; // 입출금 반영 패널 상태
+  let evOpen = {}; // 펼쳐 둔 코인 기록(id)
   let scrollApply = false;
   const isEd = (kind, id) => editing && editing.kind === kind && editing.id === id;
 
@@ -25,6 +26,13 @@
   // 스냅샷의 after: 그날 입출금이 이미 반영된 잔고인지 (옛 데이터는 메모 끝이 '후'면 반영된 것으로 본다)
   function normalize(d) {
     d.snapshots.forEach((r) => { if (r.after === undefined) r.after = /후$/.test(r.note || ''); });
+    // 예전 버전이 기록의 메모로 잘못 저장한 '읽기 결과 안내문'은 지운다 (직접 쓴 메모는 그대로)
+    const AUTO = /^(실현 손익을 읽지 못했어요|ROI를 찾지 못했어요|종료 날짜를 못 찾았어요|가격\(진입\/매도\)을|시각\(시:분\)을 못|손익 상세만 있어요|카드 손익\(|상세 항목 합계가|카드 손익의 부호를|손익\(.\)과 ROI|손익 상세 팝업과 다른 카드예요)/;
+    d.coins.forEach((c) => c.events.forEach((e) => {
+      if (!e.note) return;
+      const keep = e.note.split(' / ').filter((x) => !AUTO.test(x.trim()));
+      if (keep.length) e.note = keep.join(' / '); else delete e.note;
+    }));
     // 코인의 첫 기록만 시작 시드. 그 뒤의 '초기' 기록은 거래 결과(손익에 포함)로 본다
     d.coins.forEach((c) => c.events.forEach((e, i) => { if (i > 0 && e.type === 'i') e.type = 't'; }));
     return d;
@@ -94,14 +102,26 @@
   }
   const px = (x) => (x === undefined || x === null || x === '' ? '' : Number(x).toLocaleString('en-US', { maximumFractionDigits: 10 }));
   const stamp = (s) => (s ? s.slice(2, 16).replace(/-/g, '/') : '');
-  // 거래 기록에 붙는 진입·매도 가격, 진입·종료 시각, 보유기간 (있는 것만 표시)
-  function tradeLine(e) {
-    const out = [];
-    if (e.entryPrice !== undefined || e.exitPrice !== undefined) out.push(`진입 ${px(e.entryPrice) || '–'} → 매도 ${px(e.exitPrice) || '–'}`);
-    if (e.openAt || e.closeAt) out.push(`${stamp(e.openAt) || '–'} → ${stamp(e.closeAt) || '–'}`);
+  // 코인 기록의 상세(펀딩·수수료, 진입·매도 가격, 진입·종료 시각, 보유기간, 메모). 있는 것만 — 줄을 누르면 펼쳐진다
+  function evDetailRows(e) {
+    const r = [];
+    if (e.funding || e.fee) r.push(['펀딩 · 수수료', `${e.funding ? signed(e.funding, 2) : '–'} · ${e.fee ? signed(e.fee, 2) : '–'}`]);
+    if (e.entryPrice !== undefined || e.exitPrice !== undefined) r.push(['진입 → 매도', `${px(e.entryPrice) || '–'} → ${px(e.exitPrice) || '–'}`]);
+    if (e.openAt || e.closeAt) r.push(['진입 → 종료', `${stamp(e.openAt) || '–'} → ${stamp(e.closeAt) || '–'}`]);
     const h = holdText(e.openAt, e.closeAt);
-    if (h) out.push(`보유 ${h}`);
-    return out.length ? `<br><small class="muted">${out.map(esc).join(' · ')}</small>` : '';
+    if (h) r.push(['보유기간', h]);
+    if (e.note && !e.flow) r.push(['메모', e.note]);
+    return r;
+  }
+  function evRow(c, e) {
+    const det = evDetailRows(e);
+    const open = det.length > 0 && evOpen[e.id];
+    return `<li class="evrow"><span class="d">${short(e.date)}</span>
+      <span class="badge b-${e.type}">${TYPE_LABEL[e.type]}</span>
+      <span class="grow${det.length ? ' tg' : ''}"${det.length ? ` data-evt="${e.id}"` : ''}>${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.flow ? ' <span class="chip">입출금</span>' : ''}${det.length ? ` <span class="chev">${open ? '▴' : '▾'}</span>` : ''}</span>
+      <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : `${signed(e.delta)}${e.prev ? `<br><small>${signed((e.delta / e.prev) * 100, 1)}%</small>` : ''}`}</span>
+      ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button>
+      ${open ? `<div class="evdetail">${det.map(([k, v]) => `<div><span class="k">${k}</span><span>${esc(v)}</span></div>`).join('')}</div>` : ''}</li>`;
   }
 
   // ---------- 계산 ----------
@@ -317,6 +337,7 @@
         exact.amount = bd.realized;
         exact.note = [exact.note, '카드 손익의 부호를 손익 상세 팝업 기준으로 맞췄어요'].filter(Boolean).join(' / ');
       }
+      if (exact) exact.popupOk = true; // 부호가 팝업으로 확인된 카드
       const open = items.filter((it) => it.amount !== null);
       const hit = exact || (open.length === 1 ? open[0] : null);
       const target = hit || { coin: '', amount: bd.realized, date: '', funding: null, fee: null, note: '손익 상세만 있어요. 코인과 날짜를 직접 고르세요', source: 'Realized PNL 상세' };
@@ -329,7 +350,7 @@
     }
     // 손익과 ROI의 부호가 다르면 글자 인식 오류일 가능성이 크다
     items.forEach((it) => {
-      if (it.amount !== null && it.amount !== 0 && it.roiNeg !== null && it.roiNeg !== it.amount < 0) {
+      if (!it.popupOk && it.amount !== null && it.amount !== 0 && it.roiNeg !== null && it.roiNeg !== it.amount < 0) {
         it.note = [it.note, `손익(${it.amount < 0 ? '−' : '+'})과 ROI(${it.roiNeg ? '−' : '+'})의 부호가 달라요. 손익 부호를 꼭 확인하세요`].filter(Boolean).join(' / ');
       }
     });
@@ -523,7 +544,7 @@
     let n = 0;
     shot.items.forEach((it, i) => {
       if (!it.on || !plans[i]) return;
-      const ev = { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't', note: it.note && /^(상세|ROI|종료|가격|시각)/.test(it.note) ? undefined : (it.note || undefined) };
+      const ev = { id: nid(), seed: plans[i].after, date: dateKey(it), type: 't' }; // it.note는 읽기 결과 안내라서 저장하지 않는다
       if (it.funding !== null && it.funding !== undefined && it.funding !== '') ev.funding = +it.funding;
       if (it.fee !== null && it.fee !== undefined && it.fee !== '') ev.fee = +it.fee;
       for (const k of ['entryPrice', 'exitPrice']) if (it[k] !== null && it[k] !== undefined && it[k] !== '') ev[k] = +it[k];
@@ -889,13 +910,9 @@
         ${isOpen ? `
           <button class="link" data-act="addev" data-coin="${esc(c.sym)}">${formOpen['ev' + c.sym] ? '닫기' : '+ 기록 추가'}</button>
           <button class="link" data-act="lev" data-coin="${esc(c.sym)}">레버리지 변경</button>
+          ${st.rows.some((e) => evDetailRows(e).length) ? `<button class="link" data-act="evall" data-coin="${esc(c.sym)}">상세 ${st.rows.some((e) => evDetailRows(e).length && evOpen[e.id]) ? '모두 접기' : '모두 펼치기'}</button>` : ''}
           ${formOpen['ev' + c.sym] ? coinForm(c) : ''}
-          <ul class="list">${[...st.rows].reverse().map((e) => isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : `
-            <li><span class="d">${short(e.date)}</span>
-            <span class="badge b-${e.type}">${TYPE_LABEL[e.type]}</span>
-            <span class="grow">${num(e.seed)}${e.type === 'w' ? ` <small class="muted">(−${num(e.amount || 0)} 출금)</small>` : ''}${e.note ? ` <small class="muted">${esc(e.note)}</small>` : ''}${e.funding || e.fee ? `<br><small class="muted">${e.funding ? `펀딩 ${signed(e.funding, 2)}` : ''}${e.funding && e.fee ? ' · ' : ''}${e.fee ? `수수료 ${signed(e.fee, 2)}` : ''}</small>` : ''}${tradeLine(e)}</span>
-            <span class="delta ${e.pnlEvent ? cls(e.delta) : 'muted'}">${e.delta === null ? '' : `${signed(e.delta)}${e.prev ? `<br><small>${signed((e.delta / e.prev) * 100, 1)}%</small>` : ''}`}</span>
-            ${editBtn('ev', e.id, c.sym)}<button class="x" data-del="ev" data-coin="${esc(c.sym)}" data-id="${e.id}" aria-label="삭제">×</button></li>`).join('')}
+          <ul class="list">${[...st.rows].reverse().map((e) => (isEd('ev', e.id) ? `<li class="editli">${coinForm(c, e)}</li>` : evRow(c, e))).join('')}
           </ul>
           <p class="hint">오른쪽 숫자는 직전 기록 대비 시드 변화(금액과 %)입니다. 출금은 출금액을 되돌려 계산해요. 최종 손익 합은 현재 시드에서 첫 시드를 뺀 값이에요 (출금·밸런스조정·시드추가도 그대로 반영된 값).</p>` : ''}
       </section>`;
@@ -976,12 +993,13 @@
   const commit = () => { save(); render(); };
 
   document.addEventListener('click', (ev) => {
-    const t = ev.target.closest('[data-tab],[data-toggle],[data-act],[data-del],[data-edit],[data-cancel]');
+    const t = ev.target.closest('[data-tab],[data-toggle],[data-act],[data-del],[data-edit],[data-cancel],[data-evt]');
     if (!t) return;
     const d = t.dataset;
     if (d.tab) { tab = d.tab; editing = null; render(); window.scrollTo(0, 0); }
     else if (t.hasAttribute('data-cancel')) { editing = null; render(); }
     else if (d.edit) { editing = { kind: d.edit, id: d.id }; render(); }
+    else if (d.evt) { evOpen[d.evt] = !evOpen[d.evt]; render(); }
     else if (d.toggle) { openCoin = openCoin === d.toggle ? null : d.toggle; render(); }
     else if (d.del) {
       if (!confirm('삭제할까요?')) return;
@@ -1007,6 +1025,12 @@
       if (d.act === 'addsnap') toggle('snap');
       if (d.act === 'addflow') toggle('flow');
       if (d.act === 'addlog') toggle('log');
+      if (d.act === 'evall') {
+        const rows = coinStats(findCoin(d.coin)).rows.filter((e) => evDetailRows(e).length);
+        const anyOpen = rows.some((e) => evOpen[e.id]);
+        rows.forEach((e) => { evOpen[e.id] = !anyOpen; });
+        render();
+      }
       if (d.act === 'applyflow') { const f = db.flows.find((x) => x.id === d.id); if (f) { startApply(f, false); render(); } }
       if (d.act === 'apply') applyFlow();
       if (d.act === 'applycancel') { applying = null; render(); }
